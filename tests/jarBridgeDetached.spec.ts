@@ -216,4 +216,56 @@ describe('JarSpiderBridge — 转换脱离 App 进程（detached / 收编 / 接�
     expect(jars.every((f) => !f.endsWith('.part.jar'))).toBe(true);
     expect(readFileSync(join(cacheDir, '.converted-version'), 'utf8').trim()).toBe(String(CONVERTED_CACHE_VERSION));
   });
+
+  it.each([false, true])('普通转换及后台收编都在发布缓存前修复构造器（遗留=%s）', async leftover => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    mkdirSync(join(jvmDir, 'native-bridge'));
+    writeFileSync(join(jvmDir, 'native-bridge', 'native-bridge.jar'), 'stub');
+    const cacheDir = join(jvmDir, 'converted');
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir }, makeHost());
+    const url = 'https://example.com/r8.jar';
+    if (leftover) writeFinishedPart(cacheDir, url);
+    spawnMock.mockImplementation((_exe, argv: string[]) => {
+      const child = fakeChild();
+      setTimeout(() => {
+        if (argv.includes('com.winbox.nativebridge.DexJarRepair')) {
+          const main = argv.indexOf('com.winbox.nativebridge.DexJarRepair');
+          expect(existsSync(join(cacheDir, `${md5Hex(url)}.jar`))).toBe(false);
+          writeFileSync(argv[main + 2], buildZip([{ name: 'Repaired.class', bytes: Buffer.from('fixed') }]));
+          child.stdout.emit('data', '[dexjar-repair] fixed sites = 348');
+        } else {
+          writeFileSync(argv[argv.indexOf('-o') + 1], buildZip([{ name: 'Original.class', bytes: Buffer.from('original') }]));
+        }
+        child.emit('close', 0);
+      }, 0);
+      return child;
+    });
+    const output = await bridge.ensureConverted(url);
+    const repair = spawnMock.mock.calls.find(call => call[1].includes('com.winbox.nativebridge.DexJarRepair'))!;
+    expect(repair).toBeTruthy();
+    expect(repair[1][repair[1].indexOf('com.winbox.nativebridge.DexJarRepair') + 4]).not.toContain('*');
+    expect(readFileSync(output).includes(Buffer.from('Repaired.class'))).toBe(true);
+    expect(spawnMock).toHaveBeenCalledTimes(leftover ? 1 : 2);
+  });
+
+  it('构造器修复失败不发布坏缓存，保留 part 供后续收编重试', async () => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    mkdirSync(join(jvmDir, 'native-bridge'));
+    writeFileSync(join(jvmDir, 'native-bridge', 'native-bridge.jar'), 'stub');
+    const cacheDir = join(jvmDir, 'converted');
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir }, makeHost());
+    const url = 'https://example.com/repair-fails.jar';
+    const part = writeFinishedPart(cacheDir, url);
+    spawnMock.mockImplementation(() => {
+      const child = fakeChild();
+      setTimeout(() => child.emit('close', 1), 0);
+      return child;
+    });
+    await expect(bridge.ensureConverted(url)).rejects.toThrow('DEX 构造器修复失败');
+    expect(existsSync(part)).toBe(true);
+    expect(existsSync(join(cacheDir, `${md5Hex(url)}.jar`))).toBe(false);
+    expect(existsSync(`${part}.constructors.jar`)).toBe(false);
+  });
 });

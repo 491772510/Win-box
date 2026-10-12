@@ -29,18 +29,17 @@ W_HERE="$(win "$HERE")"
 W_BASE="$(win "$BASE")"
 W_OUT="$(win "$OUT")"
 
-WORK="${TEMP:-/tmp}/stubwork"
-# ★ 注意：本机 safe-delete 会拦截 rm -rf，且 Windows 下 $TEMP 是 C:\... 形式
-#   （bash 的 rm 能处理）。这里用唯一目录名 + 先删后建，避免复用上次的残留
-#   （残留会导致 jar xf 读到半截 base.jar → EOFException）。
-W_WORK_OLD="$(win "$WORK")"
-rm -rf "$WORK" 2>/dev/null || true
-mkdir -p "$WORK"
+WORK="$(mktemp -d "${TEMP:-/tmp}/stubwork.XXXXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
 W_WORK="$(win "$WORK")"
 
 # 1) 解开基线 jar（保留其中的 com.github.catvod.* 等非本目录类）
 cp "$BASE/stubs.jar" "$WORK/base.jar"
 ( cd "$WORK" && "$JAR" xf base.jar )
+rm "$WORK/base.jar"
+rm -f "$WORK/com/github/catvod/spider/DexNative.class"
+# Record resources before compiler lists are added; do not drop non-class assets.
+( cd "$WORK" && find . -type f ) > "$WORK/baseline.txt"
 
 # 2) 编译本目录全部 android.* / androidx.* / com.github.catvod.* 源码
 #    -cp    指向基线解包目录（历史类）+ libs（gson/okhttp/jsoup/json）
@@ -54,14 +53,15 @@ for j in "$HERE/../libs"/*.jar; do
     [ -e "$j" ] || continue
     WIN_LIBS="$WIN_LIBS$(win "$j");"
 done
-find "$HERE" -name '*.java' | while read -r f; do win "$f"; done > "$WORK/files.txt"
+find "$HERE" -path '*/shell-shim' -prune -o -name '*.java' -print |
+    while read -r f; do printf '"%s"\n' "$(win "$f" | tr '\\' '/')"; done > "$WORK/files.txt"
 
 # SpiderRunner 是**宿主侧运行器**（等效 DexClassLoader 的调用入口），与 stub 类同处
 # 一个 jar。它必须每次一起重编：initApi(SpiderApi) 的注入逻辑就在这里，
 # 漏编会让新增的 SpiderApi 永远送不到蜘蛛手里（蜘蛛字段为 null → 内部 NPE）。
 RUNNER="$HERE/../SpiderRunner.java"
 if [ -f "$RUNNER" ]; then
-    win "$RUNNER" >> "$WORK/files.txt"
+    printf '"%s"\n' "$(win "$RUNNER" | tr '\\' '/')" >> "$WORK/files.txt"
 fi
 
 # PythonRunner 是 .py 蜘蛛（Jython）的宿主入口。它 import org.python.*，编译期
@@ -70,7 +70,7 @@ fi
 if ls "$HERE"/../libs/jython-standalone*.jar >/dev/null 2>&1; then
     PYRUNNER="$HERE/../PythonRunner.java"
     if [ -f "$PYRUNNER" ]; then
-        win "$PYRUNNER" >> "$WORK/files.txt"
+        printf '"%s"\n' "$(win "$PYRUNNER" | tr '\\' '/')" >> "$WORK/files.txt"
     fi
 fi
 
@@ -80,12 +80,10 @@ fi
     -d "$W_WORK" \
     @"$W_WORK/files.txt"
 
-# 3) 重新打包
-#    ★ 用「显式清单」打包：只收 .class 与 META-INF，避免把 base.jar / files.txt /
-#      out.jar 自己打进去（第 3 轮曾因此产生嵌套损坏条目 → jar xf 报 EOFException）。
-#    ★ 不 rm 临时文件：本机 safe-delete 会拦截，且对 $TEMP 这类 Windows 路径会失败。
+# 3) 重新打包：基线资源 + 编译类的显式清单，不混入构建列表或临时 JAR。
 TMPOUT="$WORK/out.jar"
-( cd "$WORK" && find . \( -name '*.class' -o -path './META-INF/*' \) -type f ) > "$WORK/pack.txt"
+( cat "$WORK/baseline.txt"; cd "$WORK" && find . -name '*.class' -type f ) |
+    sort -u | while read -r f; do printf '"%s"\n' "$f"; done > "$WORK/pack.txt"
 ( cd "$WORK" && "$JAR" cf "$(win "$TMPOUT")" @"$(win "$WORK/pack.txt")" )
 cp "$TMPOUT" "$OUT"
 echo "built $OUT ($(cd "$WORK" && find . -name '*.class' | wc -l) classes)"

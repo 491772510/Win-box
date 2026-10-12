@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { resolveShareFile, extractEpisodeFid, extractEpisodeName, episodeKeyOf, matchTransferredFile, isQuarkSharePlay, extractQuarkShare, isDirNode, isRealFileNode, quarkPlayUrl, QUARK_CACHE_DIR_NAME, SESSION_DIR_PREFIX, sessionDirName } from '../src/main/net/quarkTransfer';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { resolveShareFile, extractEpisodeFid, extractEpisodeName, episodeKeyOf, matchTransferredFile, isQuarkSharePlay, extractQuarkShare, isDirNode, isRealFileNode, quarkPlayUrl, quarkTransfer, QUARK_CACHE_DIR_NAME, SESSION_DIR_PREFIX, sessionDirName } from '../src/main/net/quarkTransfer';
 import type { ShareListFetcher } from '../src/main/net/quarkTransfer';
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('网盘所选文件描述兼容', () => {
   it('保留 fileId 与百度 fs_id，数字按字符串提取不丢精度', () => {
@@ -84,6 +86,14 @@ describe('isQuarkSharePlay', () => {
   });
   it('含 sId 的 episode JSON', () => {
     expect(isQuarkSharePlay('{"url":"","flag":"","fid":"x","sId":"abc123"}')).toBe(true);
+  });
+  it('明确 UC/百度描述不因 sId 误判夸克，非法 JSON 不识别', () => {
+    const d = JSON.stringify({ sId: 'abc123', fid: 'file-3' });
+    expect(isQuarkSharePlay(d, '优汐无限1')).toBe(false);
+    expect(extractQuarkShare(d, 'UC#3')).toBeNull();
+    expect(extractQuarkShare(JSON.stringify({ sId: 'abc123', site: 'baidu' }))).toBeNull();
+    expect(isQuarkSharePlay('{"sId":"abc123"')).toBe(false);
+    expect(isQuarkSharePlay('http://127.0.0.1/proxy?fileId=' + encodeURIComponent('https://pan.quark.cn/s/abc123'))).toBe(true);
   });
   it('空/普通地址 → false', () => {
     expect(isQuarkSharePlay('')).toBe(false);
@@ -249,6 +259,24 @@ describe('extractEpisodeFid（episode id 提取内层 fid）', () => {
 
 // ★ 2026-09-29（用户报「部分资源夸克播放失败」）：fid 未命中时按集名唯一匹配兜底
 describe('extractEpisodeName / episodeKeyOf（集名兜底）', () => {
+  it.each([
+    ['03~4K.mp4', 'ep3'], ['05~4K(1).mp4', 'ep5'],
+    ['[【L】蘭丨]03-4K.mp4[1.63GB]', 'ep3'], ['12 4K-.mp4', 'ep12'],
+    ['片头.mp4', '片头'], ['片尾.mp4', '片尾'], ['Trailer4.mp4', 'Trailer4'],
+    ['4K.mp4', '4K'], ['1080p.mp4', '1080p'],
+  ])('真实 UC 文件名 %s 不把画质或扩展名当集号', (name, key) => {
+    expect(episodeKeyOf(name)).toBe(key);
+  });
+
+  it('解析潇洒玩偶复合选集，提供商必须明确', () => {
+    const id = '03~4K.mp4[1.01GB]__' + 'a'.repeat(32) + '+11adf8105c314+' + 'b'.repeat(32);
+    expect(extractEpisodeFid(id)).toBe('a'.repeat(32));
+    expect(extractEpisodeName(id)).toBe('03~4K.mp4[1.01GB]');
+    expect(extractQuarkShare(id, '夸克无限#4')).toEqual({ sId: '11adf8105c314', passcode: '' });
+    expect(extractQuarkShare(id, 'UC无限#5')).toBeNull();
+    expect(extractQuarkShare(id)).toBeNull();
+    expect(extractEpisodeFid(id + '+extra')).toBe('');
+  });
   it('从 episode JSON 提取集名（name / file_name / fileName / title，含转义）', () => {
     expect(extractEpisodeName('{"sId":"a","name":"第6集.mp4"}')).toBe('第6集.mp4');
     expect(extractEpisodeName('{"file_name":"Show.S01E06.mkv"}')).toBe('Show.S01E06.mkv');
@@ -299,5 +327,103 @@ describe('resolveShareFile — fid 未命中 → 按集名唯一匹配（★ 202
   it('fid 精确命中时优先（不触发集名兜底）', async () => {
     const r = await resolveShareFile('ep1', quiet, fetcher, '第02集');
     expect(r?.fid).toBe('ep1');
+  });
+});
+
+describe('quarkTransfer（分享免转存优先）', () => {
+  it('使用分享文件的 fid/token 直接取链，不触发转存', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (url.pathname.endsWith('/share/sharepage/token')) {
+        return new Response(JSON.stringify({ code: 0, data: { stoken: 'share-session' } }));
+      }
+      if (url.pathname.endsWith('/share/sharepage/detail')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { list: [{ fid: 'share-file', dir: false, file_name: '第03集.mp4', size: 100, share_fid_token: 'share-token' }] },
+        }));
+      }
+      if (url.hostname === 'drive-m.quark.cn' && url.pathname.endsWith('/file/share/download')) {
+        expect(url.searchParams.get('pr')).toBe('ucpro');
+        expect(url.searchParams.get('fr')).toBe('h5');
+        expect(body).toEqual({
+          fids: ['share-file'],
+          fids_token: ['share-token'],
+          pwd_id: 'share-id',
+          stoken: 'share-session',
+        });
+        return new Response(JSON.stringify({ code: 0, data: [{ download_url: 'https://media.test/share-file' }] }), {
+          headers: [['set-cookie', '__puus=fresh; Path=/'], ['set-cookie', 'session=new; Path=/']],
+        });
+      }
+      throw new Error(`unexpected quark request: ${url.pathname}`);
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    const r = await quarkTransfer('share-id', 'account=one', { innerFid: 'share-file' });
+    expect(r).toMatchObject({ ok: true, url: 'https://media.test/share-file' });
+    expect(r.fid).toBeUndefined();
+    expect(r.pdirFid).toBeUndefined();
+    expect(r.header.Cookie).toBe('account=one; __puus=fresh; session=new');
+    expect(fetch.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
+      '/1/clouddrive/share/sharepage/token', '/1/clouddrive/share/sharepage/detail', '/1/clouddrive/file/share/download',
+    ]);
+  });
+
+  it('真实 UC 画质命名在旧 fid 失效时按第3、第5、第3集唯一匹配', async () => {
+    const quiet = { i: () => {}, w: () => {}, e: () => {} };
+    const file = (fid: string, name: string) => ({ fid, dir: false, file_name: name, size: 100, share_fid_token: `tk-${fid}` });
+    const f = async () => [file('third', '03~4K(1).mp4'), file('fifth', '05~4K(1).mp4'), file('intro', '片头.mp4')];
+    for (const [name, fid] of [['[剧名]03-4K.mp4[1.63GB]', 'third'], ['05~4K.mp4[957.83MB]', 'fifth'], ['03~4K.mp4', 'third']]) {
+      expect((await resolveShareFile('stale-fid', quiet, f, name))?.fid).toBe(fid);
+    }
+  });
+
+  it('同集不同画质仍拒绝盲选，不会把第5集作为第3集', async () => {
+    const quiet = { i: () => {}, w: () => {}, e: () => {} };
+    const file = (fid: string, name: string) => ({ fid, dir: false, file_name: name, size: 100, share_fid_token: `tk-${fid}` });
+    const f = async () => [file('third-a', '03~4K.mp4'), file('third-b', '03~4K(1).mp4'), file('fifth', '05~4K.mp4')];
+    expect(await resolveShareFile('stale', quiet, f, '03-4K.mp4')).toBeNull();
+  });
+
+  it.each(['denied', 'network', 'size-limit'] as const)('免转存 %s 时保留精确转存兜底', async (failure) => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      const reply = (data: unknown) => new Response(JSON.stringify(data));
+      if (url.pathname.endsWith('/share/sharepage/token')) return reply({ code: 0, data: { stoken: 'session' } });
+      if (url.pathname.endsWith('/share/sharepage/detail')) return reply({ code: 0, data: { list: [
+        { fid: 'ep3', dir: false, size: 100, file_name: '第03集.mp4', share_fid_token: 'token3' },
+        { fid: 'ep5', dir: false, size: 100, file_name: '第05集.mp4', share_fid_token: 'token5' },
+      ] } });
+      if (url.pathname.endsWith('/file/share/download')) {
+        if (failure === 'network') throw new Error('offline');
+        if (failure === 'size-limit') return new Response(JSON.stringify({ code: 23018, message: 'download file size limit[secret-fid]' }), { status: 400 });
+        return reply({ code: 403, message: 'unsupported' });
+      }
+      if (url.pathname.endsWith('/file')) {
+        if (init?.method === 'POST') return reply({ code: 0, data: { fid: 'session-dir' } });
+        return reply({ code: 0, data: { list: url.searchParams.get('pdir_fid') === '0'
+          ? [{ fid: 'cache-dir', dir: true, file_name: QUARK_CACHE_DIR_NAME }] : [] } });
+      }
+      if (url.pathname.endsWith('/share/sharepage/save')) return reply({ code: 0, data: { task_id: 'task' } });
+      if (url.pathname.endsWith('/task')) return reply({ status: 200, data: { status: 2, save_as: { save_as_top_fids: ['own-ep3'] } } });
+      if (url.pathname.endsWith('/acquire_dl_token')) return reply({ code: 0, data: { token: 'speed' } });
+      if (url.pathname.endsWith('/file/download')) return reply({ code: 0, data: [{ download_url: `https://media.test/${body.fids[0]}` }] });
+      throw new Error(`Unexpected request ${url.pathname}`);
+    });
+    vi.stubGlobal('fetch', fetch);
+    const logger = { i: vi.fn(), w: vi.fn(), e: vi.fn() };
+    const r = await quarkTransfer('share', `cookie-${failure}`, { innerFid: 'ep3', logger });
+    if (failure === 'size-limit') {
+      expect(logger.w).toHaveBeenCalledWith(expect.stringContaining('文件大小限制'));
+      expect(JSON.stringify(logger.w.mock.calls)).not.toContain('secret-fid');
+    }
+    expect(r).toMatchObject({ ok: true, url: 'https://media.test/own-ep3', fid: 'own-ep3', pdirFid: 'session-dir' });
+    const save = fetch.mock.calls.find(([input]) => new URL(String(input)).pathname.endsWith('/share/sharepage/save'));
+    expect(JSON.parse(String(save?.[1]?.body))).toMatchObject({ fid_list: ['ep3'], fid_token_list: ['token3'], to_pdir_fid: 'session-dir' });
+    const paths = fetch.mock.calls.map(([input]) => new URL(String(input)).pathname);
+    expect(paths.indexOf('/1/clouddrive/file/share/download')).toBeLessThan(paths.indexOf('/1/clouddrive/share/sharepage/save'));
   });
 });

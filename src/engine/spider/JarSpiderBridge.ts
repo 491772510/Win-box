@@ -6,10 +6,10 @@
 import { spawn } from 'node:child_process';
 import {
   mkdirSync, existsSync, readFileSync, writeFileSync, statSync,
-  renameSync, openSync, closeSync, readSync, rmSync,
+  renameSync, openSync, closeSync, readSync, rmSync, copyFileSync,
 } from 'node:fs';
 import { totalmem } from 'node:os';
-import { join, basename, dirname } from 'node:path';
+import { join, basename, dirname, resolve } from 'node:path';
 import type { EngineHost } from '../ports';
 import { md5Hex } from '../util/md5';
 import { contentHashOf, recordContentKey, tryCloneByContent } from './jarContentIndex';
@@ -26,6 +26,7 @@ import { ensureJailDrive, jailSpawnCwd, releaseJailDrive, JAIL_DIR_NAME } from '
 import { buildZip, listZipEntries, looksLikeZip, readZipEntries, zipEntrySizes, type ZipEntryData } from '../util/syncZip';
 import { SpiderProcPool, poolEnabled, servePoolKey, WARM_METHOD, type PoolResult } from './SpiderProcPool';
 import { fixSelfSuperCallsInJarFile } from './classFix';
+import { hasNativeMethods } from './nativeClass';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import {
   archName,
@@ -61,8 +62,9 @@ interface PythonWheelSpec {
  * - v2：补齐 raw jar 的非 dex 资源（assets/**、META-INF/** 等）
  * - v3：修补「super 调用被转成自递归 invokespecial」（classFix.ts）—— 旧产物里这些类
  *       一调用就 StackOverflowError（整族盘搜蜘蛛受影响），必须作废重转才生效
+ * - v4：普通 JAR 也执行 DexJarRepair，恢复被 dex2jar 误译的 NEW 类型及缺失构造器
  */
-export const CONVERTED_CACHE_VERSION = 3;
+export const CONVERTED_CACHE_VERSION = 4;
 
 export interface JarBridgeOptions {
   /** resources/jvm 目录（含 jre/d2j/stubs/libs） */
@@ -717,7 +719,7 @@ export class JarSpiderBridge {
     // 2) ★★ 先「收编」上次会话遗留、已经跑完的后台转换（2026-09-27 新增，勿删）★★
     //    场景：关窗/重启时 detached 的转换进程仍在跑并已写出完整产物 → 这里只需
     //    「合并 raw 资源 + 原子改名」，秒级完成，用户不必再等一次 dex2jar。
-    if (this.adoptFinishedPart(key, rawJar, target, false)) {
+    if (await this.adoptFinishedPart(key, rawJar, target, false)) {
       this.host?.logger.i(`jvm-bridge 已收编后台完成的转换产物（上次会话遗留，无需重转）: ${basename(target)}`);
       this.finishConvert(jarUrl, target, contentKey);
       return target;
@@ -802,7 +804,7 @@ export class JarSpiderBridge {
       throw new Error(`dex2jar 转换失败（进程退出异常${r.timedOut ? '，转换超时' : ''}）：${tail || '无输出'}`);
     }
     // 5) 校验 + 合并 raw 资源 + 原子改名 part → target（strict：本次刚跑完，失败必须报准原因）
-    this.adoptFinishedPart(key, rawJar, target, true);
+    await this.adoptFinishedPart(key, rawJar, target, true);
     this.finishConvert(jarUrl, target, contentKey);
     return target;
   }
@@ -1004,10 +1006,10 @@ export class JarSpiderBridge {
   /**
    * 把「已经写完整的转换产物」正式收编：校验 → 合并 raw 资源 → 原子改名 part → target。
    *
-   * @param strict 本次刚跑完的转换用 true（失败必须抛准原因）；收编历史遗留用 false（静默返回 false）
+   * @param strict 本次刚跑完的转换用 true；历史遗留用 false（不完整产物返回 false，修复失败仍抛原因）
    * @returns 收编成功（target 已是可用产物）
    */
-  private adoptFinishedPart(key: string, rawJar: string, target: string, strict: boolean): boolean {
+  private async adoptFinishedPart(key: string, rawJar: string, target: string, strict: boolean): Promise<boolean> {
     const part = this.partPath(key);
     let size = 0;
     try {
@@ -1026,6 +1028,8 @@ export class JarSpiderBridge {
     // ★★ 把 raw jar 里 dex2jar「不认」的资源原样搬回转换产物 —— 加固/壳类蜘蛛的生死线 ★★
     //   见 copyJarResources 的详细说明（缺 assets/*.so 会让 DexNative.<clinit> 直接 NPE）。
     copyJarResources(rawJar, part, this.host);
+    // R8 删除子类构造器后，dex2jar 会错误地 NEW 抽象祖先类。普通 JAR 与运行时载荷同样需要修复。
+    await this.repairDexConstructors(rawJar, part);
     // ★★ 修补 dex2jar 的「super 调用被转成自递归 invokespecial」—— 否则调用即 StackOverflowError ★★
     //   实测影响整族盘搜蜘蛛（sun.json 的 Pan/MiPan/PanSou/Baiku/KuLe/… 全部 init 就崩），
     //   见 classFix.ts 文件头。属于增强步骤：失败只记日志，不让「能用的产物」变成失败。
@@ -1054,7 +1058,7 @@ export class JarSpiderBridge {
     const deadline = Math.min(lock.startedAt + D2J_TIMEOUT_MS, Date.now() + D2J_TIMEOUT_MS);
     let nextLog = Date.now() + CONV_LOG_EVERY_MS;
     while (Date.now() < deadline) {
-      if (this.partLooksComplete(this.partPath(key)) && this.adoptFinishedPart(key, rawJar, target, false)) return true;
+      if (this.partLooksComplete(this.partPath(key)) && await this.adoptFinishedPart(key, rawJar, target, false)) return true;
       if (!this.converterAlive(lock)) {
         // 进程没了：要么刚好写完（下面这次收编会接住），要么失败 → 返回 false 让上层起新转换
         return this.adoptFinishedPart(key, rawJar, target, false);
@@ -1089,6 +1093,58 @@ export class JarSpiderBridge {
       for (const f of fs.readdirSync(dir)) if (f.endsWith('.jar')) out.push(join(dir, f));
     } catch { /* ignore */ }
     return out;
+  }
+
+  /** 修复在副本上异步执行；退出/失败后仍可收编原始 part，不必重跑 dex2jar。 */
+  private async repairDexConstructors(rawJar: string, part: string): Promise<void> {
+    const raw = readFileSync(rawJar);
+    if (looksLikeZip(raw) && !listZipEntries(raw).some(n => /^classes\d*\.dex$/i.test(n))) return;
+    const bridgeJar = join(this.jvmDir, 'native-bridge', 'native-bridge.jar');
+    if (!existsSync(bridgeJar)) {
+      this.host?.logger.w('jvm-bridge DEX 构造器修复工具缺失，跳过修复');
+      return;
+    }
+    // Baksmali 的子进程需要完整 classpath；不能把未展开的目录通配符传给它。
+    const d2jCp = this.dirJars(join(this.jvmDir, 'd2j')).map(p => resolve(p)).join(';');
+    const java = resolve(this.javaExe());
+    const work = `${part}.constructors.jar`;
+    copyFileSync(part, work);
+    try {
+      const output = await new Promise<string>((resolveOutput, reject) => {
+        const child = spawn(java, [
+          '-Xmx384m', '-XX:+UseSerialGC', '-XX:TieredStopAtLevel=1', '-Dfile.encoding=UTF-8',
+          '-cp', [resolve(bridgeJar), d2jCp].join(';'), 'com.winbox.nativebridge.DexJarRepair',
+          resolve(rawJar), resolve(work), java, d2jCp,
+        ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        this.activeChildren.add(child);
+        let out = '';
+        let settled = false;
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          this.activeChildren.delete(child);
+          if (error) reject(error);
+          else resolveOutput(out);
+        };
+        const timer = setTimeout(() => {
+          child.kill();
+          finish(new Error('DEX 构造器修复超时'));
+        }, D2J_TIMEOUT_MS);
+        timer.unref?.();
+        const onData = (data: Buffer | string) => { out = (out + String(data)).slice(-8000); };
+        child.stdout?.on('data', onData);
+        child.stderr?.on('data', onData);
+        child.on('error', (error) => finish(error));
+        child.on('close', (code) => finish(code === 0 ? undefined : new Error(`DEX 构造器修复失败（code=${code}）：${out.slice(-400)}`)));
+      });
+      const fixed = /fixed sites = (\d+)/.exec(output);
+      if (!fixed || !isUsableConvertedJar(work)) throw new Error(`DEX 构造器修复未完成：${output.slice(-400)}`);
+      renameSync(work, part);
+      this.host?.logger.i(`jvm-bridge DEX 构造器修复完成：${fixed[1]} 处（${basename(part)}）`);
+    } finally {
+      try { rmSync(work, { force: true }); } catch { /* 下次收编时覆盖副本 */ }
+    }
   }
 
   /**
@@ -1860,7 +1916,7 @@ export class JarSpiderBridge {
   /**
    * ★ 2026-09-26：**是否需要原生桥**（同步判定，避免在普通路径上引入 await —— 
    * 否则 spawn 会被推迟到微任务，调用方「紧接着断言子进程」的既有行为会被打破）。
-   * 条件：宿主配置了运行时目录 + 桥 jar 在 + 至少一只 jar 内含 `.so`。
+   * 条件：宿主配置了运行时目录 + 桥 jar 在 + 至少一只 jar 含 `.so` 或 native 声明。
    */
   private nativeNeeded(jarPaths: string[]): boolean {
     if (!this.nativeRuntimeDir) return false;
@@ -1877,7 +1933,7 @@ export class JarSpiderBridge {
     ];
   }
 
-  /** 转换产物是否含 `.so`（= 需要原生桥）；按产物路径缓存（只扫 zip 目录，开销可忽略） */
+  /** 包内 .so 或声明 native 方法（运行时下载库的壳）；按产物路径缓存。 */
   private jarNeedsNative(jarPath: string): boolean {
     const hit = this.nativeFlag.get(jarPath);
     if (hit !== undefined) return hit;
@@ -1885,6 +1941,9 @@ export class JarSpiderBridge {
     try {
       const buf = readFileSync(jarPath);
       has = looksLikeZip(buf) && listZipEntries(buf).some((n) => n.endsWith('.so'));
+      if (!has && looksLikeZip(buf)) {
+        has = readZipEntries(buf).some((e) => e.name.endsWith('.class') && hasNativeMethods(e.bytes));
+      }
     } catch {
       has = false;
     }

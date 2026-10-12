@@ -61,6 +61,9 @@ public class View {
     private boolean selected = false;
     private ViewParent parent;
     private LayoutParams layoutParams;
+    private final ViewTreeObserver viewTreeObserver = new ViewTreeObserver();
+
+    public ViewTreeObserver getViewTreeObserver() { return viewTreeObserver; }
 
     public static final int NO_ID = -1;
 

@@ -8,10 +8,11 @@ import BackButton from '../components/BackButton';
 import { isDetailWindow } from '../lib/detailWin';
 import { uiMem, schedulePersist } from '../lib/uiMemory';
 import type { Episode, VodDetail } from '../../shared/types';
+import { playbackResultError } from '../../shared/playbackResult';
 import { useCovers } from '../lib/useCovers';
 import HeroBackdrop from '../components/HeroBackdrop';
 import { formatEpisodeLabel } from '../lib/epName';
-import { EP_PAGE_SIZE, epPageSlice } from '../lib/epPager';
+import { EP_PAGE_SIZE, epPageRanges, epPageSlice } from '../lib/epPager';
 import { makeStaleGuard } from '../lib/staleGuard';
 import { detailIsEmpty } from '../../engine/config/sourceKind';
 import DriveBindModal from '../components/DriveBindModal';
@@ -210,13 +211,14 @@ export default function DetailPage({
         return;
       }
       // parse=1（需网页解析/嗅探）：主进程已尽力（解析接口 → 隐藏窗口嗅探），仍拿不到直连地址才上屏原因
-      if (r.parse === 1) {
-        setErr(r.message || '该播放地址需要网页解析/嗅探，自动解析未取得直连地址');
+      const playError = playbackResultError(r);
+      if (playError) {
+        setErr(playError);
         return;
       }
       // ★ 网盘源集名过长 → 播放器标题/历史记录统一用「第N集 · 体积」
       const label = formatEpisodeLabel(target.name, index);
-      onPlay(r.url || target.url, `${displayName} - ${label}`, key!, id!, {
+      onPlay(r.url, `${displayName} - ${label}`, key!, id!, {
         pic: detail.pic,
         remarks: label,
         sourceName: cfg.sources.find((s) => s.key === key)?.name || key,
@@ -345,8 +347,18 @@ export default function DetailPage({
                     <span key={f} className={`tag ${f === flag ? 'active' : ''}`} onClick={() => chooseFlag(f)}>{f}</span>
                   ))}
                 </div>
-                {/* ★ 2026-09-30（用户要求）：剧集分页 —— 每页至多 EP_PAGE_SIZE 集；翻页按钮只放列表下方、区域右下角 */}
+                {/* 每组至多 50 集，直接选择区间；浏览区间不会改变当前选中集。 */}
                 {db && <div className="db-sec-title">选集</div>}
+                {epPaged.pageCount > 1 && (
+                  <div className="quick-picks ep-ranges" role="group" aria-label="集数区间">
+                    {epPageRanges(epAll.length).map((range) => (
+                      <button key={range.page} className={`tag ${epPaged.page === range.page ? 'active' : ''}`}
+                        aria-pressed={epPaged.page === range.page} onClick={() => goEpPage(range.page)}>
+                        {range.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div className="ep-list" ref={epListRef}>
                   {epPaged.items.map((e, i) => {
                     const gi = epPaged.start + i; // 全局集下标：选择/高亮/播放都按它，翻页不影响已选集
@@ -362,12 +374,6 @@ export default function DetailPage({
                   <button className={`primary${nf ? ' nf-play-btn' : ''}`} disabled={busy} onClick={() => { void play(); }}>
                     {busy ? '正在解析播放地址…' : '▶ 播放选中'}
                   </button>
-                  {epPaged.pageCount > 1 && (
-                    <div className="row ep-pager" style={{ marginLeft: 'auto', gap: 8 }}>
-                      <button disabled={epPaged.page <= 0} onClick={() => goEpPage(epPaged.page - 1)}>上一页</button>
-                      <button disabled={epPaged.page >= epPaged.pageCount - 1} onClick={() => goEpPage(epPaged.page + 1)}>下一页</button>
-                    </div>
-                  )}
                 </div>
               </>
             ) : (

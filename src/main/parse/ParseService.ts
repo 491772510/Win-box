@@ -10,6 +10,7 @@
 // 故不做 HTTP 请求，直接由 ③ 承担其语义。
 import type { HttpClient, Logger, ParseBean } from '../../shared/types';
 import { SUPER_PARSE_NAME, SUPER_PARSE_TYPE } from '../../shared/constants';
+import { isErrorVideoUrl } from '../../shared/playbackResult';
 import { buildParseUrl, extractParseResult, isMediaUrl, parseListSummary } from './parseExtract';
 
 export interface ParseResolution {
@@ -66,7 +67,7 @@ export class ParseService {
   /** 解析一个需网页解析的播放地址；返回 null = 解析失败（调用方保留原始提示） */
   async resolve(parses: ParseBean[], target: string): Promise<ParseResolution | null> {
     const url = unwrapRelayUrl((target || '').trim());
-    if (!url) return null;
+    if (!url || isErrorVideoUrl(url)) return null;
     if (isMediaUrl(url)) return { url, headers: {}, via: 'already-media' };
 
     // ★ 只认 http(s) 的解析接口：R18 这类订阅里带 "Parallel"/"Sequence"（并发/轮询的编排标记，
@@ -90,13 +91,13 @@ export class ParseService {
       const page = buildParseUrl(p.url, url);
       if (!page) continue;
       const sniff = await this.sniff(page, this.logger, SNIFF_TIMEOUT_MS);
-      if (sniff) return { ...sniff, via: `sniff:${p.name}` };
+      if (sniff && !isErrorVideoUrl(sniff.url)) return { ...sniff, via: `sniff:${p.name}` };
     }
 
     // ③ 直接嗅探原始地址（无 parses 的源站自播页）
     if (left()) {
       const sniff = await this.sniff(url, this.logger, SNIFF_TIMEOUT_MS);
-      if (sniff) return { ...sniff, via: 'sniff:direct' };
+      if (sniff && !isErrorVideoUrl(sniff.url)) return { ...sniff, via: 'sniff:direct' };
     }
 
     this.logger.w(`parse: 全部解析途径失败（parses=${parseListSummary(parses)}；地址=${url.slice(0, 90)}）`);

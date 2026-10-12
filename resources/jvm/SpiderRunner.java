@@ -311,6 +311,7 @@ public class SpiderRunner {
    *   就可能用到宿主 Context（Guard 系 BaseSpiderGuard.<init>() → Init.context()）。
    */
   private static Env setupEnv(String[] jars) throws Exception {
+    android.security.keystore.DesktopKeyStoreProvider.install();
     // BouncyCastle provider（AES/CBC/PKCS7Padding，ft y 蜘蛛依赖）
     try {
       java.security.Security.addProvider(new org.bouncycastle.jce.provider.BouncyCastleProvider());
@@ -330,6 +331,7 @@ public class SpiderRunner {
     //   先用临时 loader 做改写 → 再建正式 loader（含改写目录）。见下方实现。
     //   目录要先 mkdirs —— File.toURI() 只有对已存在目录才会带结尾斜杠（否则 URL 指向父目录）。
     File nativeJar = nativeJarOf(jars);
+    File dynamicJar = nativeJar == null ? dynamicNativeJarOf(jars) : null;
     File patchedDir = null;
     if (nativeJar != null) {
       String patchRoot = System.getProperty("tvbox.native.patch");
@@ -367,6 +369,23 @@ public class SpiderRunner {
         }
       }
     }
+    if (dynamicJar != null) {
+      try {
+        Class<?> facade = Class.forName("com.winbox.nativebridge.NativeBridgeMain");
+        String workRoot = System.getProperty("tvbox.native.work", "");
+        if (!workRoot.trim().isEmpty()) {
+          URLClassLoader resolver = new URLClassLoader(
+              new URL[]{dynamicJar.toURI().toURL()}, SpiderRunner.class.getClassLoader());
+          try {
+            patchedDir = (File) facade.getMethod("prepareDynamic", File.class, File.class, ClassLoader.class)
+                .invoke(null, dynamicJar, new File(workRoot, dynamicJar.getName()), resolver);
+          } finally { resolver.close(); }
+          if (patchedDir != null) System.err.println("[native-bridge] 动态原生库桥接已启用（库在运行时装载）");
+        }
+      } catch (Throwable t) {
+        System.err.println("[native-bridge] 动态原生库桥接准备失败: " + unwrap(t));
+      }
+    }
     if (patchedDir != null) {
       urls.add(patchedDir.toURI().toURL());
     }
@@ -377,6 +396,11 @@ public class SpiderRunner {
     if (nativeJar != null && patchedDir != null) {
       // 正式 loader 建好后再 arm 一次：桥的惰性初始化/类工厂要用**最终**加载器解析壳类
       armNativeBridge(nativeJar, cl);
+    }
+    if (dynamicJar != null && patchedDir != null) {
+      Class<?> facade = Class.forName("com.winbox.nativebridge.NativeBridgeMain");
+      facade.getMethod("arm", File.class, File.class, ClassLoader.class).invoke(null, dynamicJar,
+          new File(System.getProperty("tvbox.native.work"), dynamicJar.getName()), cl);
     }
 
     // 沙箱数据根（防蜘蛛清理缓存目录）
@@ -396,7 +420,12 @@ public class SpiderRunner {
     try {
       Class<?> ic = Class.forName("com.github.catvod.spider.Init", true, cl);
       try { ic.getMethod("init", android.content.Context.class).invoke(null, app); }
-      catch (Throwable ig) { System.err.println("[Init] " + ig); }
+      catch (Throwable ig) {
+        Throwable cause = unwrap(ig);
+        System.err.println("[Init] " + cause);
+        StackTraceElement[] trace = cause.getStackTrace();
+        for (int i = 0; i < Math.min(6, trace.length); i++) System.err.println("    at " + trace[i]);
+      }
     } catch (ClassNotFoundException ig) { }
     try {
       Class<?> ic = Class.forName("com.github.catvod.spider.Init", true, cl);
@@ -505,6 +534,20 @@ public class SpiderRunner {
         }
       } catch (Throwable ignore) { /* 非 zip / 读失败 → 跳过 */ }
     }
+    return null;
+  }
+
+  /** JARs whose ARM library is downloaded by Java rather than embedded in assets. */
+  private static File dynamicNativeJarOf(String[] jars) {
+    // Use ASM reflectively; ordinary sources do not require the native runtime on their classpath.
+    try {
+      Class<?> bridge = Class.forName("com.winbox.nativebridge.NativeBridgeMain");
+      Method detector = bridge.getMethod("hasNativeMethods", File.class);
+      for (String j : jars) {
+        File f = new File(j);
+        if (f.isFile() && Boolean.TRUE.equals(detector.invoke(null, f))) return f;
+      }
+    } catch (Throwable ignored) { }
     return null;
   }
 

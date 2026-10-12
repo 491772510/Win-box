@@ -39,6 +39,7 @@ public final class NativePatcher {
             "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;";
     /** 载荷层入口（解密 dex 里的 native → 32 位模拟器）；与 INVOKE_DESC 同形 */
     private static final String INVOKE_PAYLOAD = "invokePayload";
+    static final String PAYLOAD_METHOD = "@payload:";
 
     private NativePatcher() {
     }
@@ -51,7 +52,7 @@ public final class NativePatcher {
      * @return **实际改写**的方法数（按类里真实命中的 native 方法计，不是计划条数）
      */
     public static int patch(File jar, File outDir, Map<String, Map<String, Boolean>> plan, ClassLoader resolver) throws Exception {
-        return patchJar(jar, outDir, plan, resolver, false, null);
+        return patchJar(jar, outDir, plan, resolver, false, false, null);
     }
 
     /**
@@ -66,7 +67,13 @@ public final class NativePatcher {
      */
     public static int patchPayload(File jar, File outDir, ClassLoader resolver) throws Exception {
         int[] written = new int[1];
-        patchJar(jar, outDir, scanPayloadPlan(jar), resolver, true, written);
+        patchJar(jar, outDir, scanPayloadPlan(jar), resolver, true, false, written);
+        return written[0];
+    }
+
+    public static int patchDynamic(File jar, File outDir, ClassLoader resolver) throws Exception {
+        int[] written = new int[1];
+        patchJar(jar, outDir, scanPayloadPlan(jar), resolver, true, true, written);
         return written[0];
     }
 
@@ -118,7 +125,7 @@ public final class NativePatcher {
     }
 
     private static int patchJar(File jar, File outDir, Map<String, Map<String, Boolean>> plan,
-                                ClassLoader resolver, boolean hookLoads, int[] writtenOut) throws Exception {
+                                ClassLoader resolver, boolean hookLoads, boolean dynamic, int[] writtenOut) throws Exception {
         int patched = 0;
         skipped = 0;
         try (JarFile jf = new JarFile(jar)) {
@@ -140,7 +147,7 @@ public final class NativePatcher {
                 // ★ 只跳过「不在计划里」的类：空表 = 只做库加载钩子（载荷层）
                 if (methods == null) continue;
                 int[] done = new int[1];
-                byte[] out = patchClass(data, methods, resolver, done, hookLoads);
+                byte[] out = patchClass(data, methods, resolver, done, hookLoads, dynamic);
                 if (out == null) continue;
                 File dest = new File(outDir, internalName + ".class");
                 File parent = dest.getParentFile();
@@ -156,14 +163,14 @@ public final class NativePatcher {
     }
 
     private static byte[] patchClass(byte[] raw, Map<String, Boolean> methods, ClassLoader resolver, int[] done,
-                                     boolean hookLoads) {
+                                     boolean hookLoads, boolean dynamic) {
         int[] readerFlags = {ClassReader.SKIP_FRAMES, 0, ClassReader.EXPAND_FRAMES};
         boolean[] copies = {true, false};
         Throwable last = null;
         for (int rf : readerFlags) {
             for (boolean copy : copies) {
                 try {
-                    return patchOnce(raw, methods, resolver, copy, rf, done, hookLoads);
+                    return patchOnce(raw, methods, resolver, copy, rf, done, hookLoads, dynamic);
                 } catch (Throwable t) {
                     last = t;
                 }
@@ -174,7 +181,7 @@ public final class NativePatcher {
     }
 
     private static byte[] patchOnce(byte[] raw, Map<String, Boolean> methods, ClassLoader resolver,
-                                    boolean copyPool, int readerFlag, int[] done, boolean hookLoads) {
+                                    boolean copyPool, int readerFlag, int[] done, boolean hookLoads, boolean dynamic) {
         final int[] hit = new int[1];
         final int[] skippedLoads = new int[1];
         ClassReader reader = new ClassReader(raw);
@@ -195,9 +202,9 @@ public final class NativePatcher {
                 if (clinitRenamed[0]) {
                     MethodVisitor mv = super.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
                     mv.visitCode();
-                    // ★ 必须传**点号**类名（owner 是内部名带 `/`）：clinitRun 内部走 Class.forName
-                    mv.visitLdcInsn(owner.replace('/', '.'));
-                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, "clinitRun", "(Ljava/lang/String;)V", false);
+                    // Keep the defining loader: outer dynamic classes are not in the extra-dex loader.
+                    mv.visitLdcInsn(Type.getObjectType(owner));
+                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, "clinitRun", "(Ljava/lang/Class;)V", false);
                     mv.visitInsn(Opcodes.RETURN);
                     mv.visitMaxs(0, 0);
                     mv.visitEnd();
@@ -208,19 +215,20 @@ public final class NativePatcher {
             @Override
             public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
                 final Boolean noop = methods.get(name + descriptor);
+                final boolean payloadNative = methods.containsKey(PAYLOAD_METHOD + name + descriptor);
                 // ★★ 非目标方法必须**转交 writer**：ASM 里 visitMethod 返回 null 表示
                 //    「本访问者不关心该方法」，ClassReader 会整段跳过 → 改写后的类会丢掉
                 //    构造器 / <clinit> / 全部真实方法（实测：改写后 getMethod("plain") 直接
                 //    NoSuchMethodException）。必须 super.visitMethod(...) 才会逐条复制。
                 //    ★ 但即使是非目标方法，也要经过「库加载中性化」过滤器（见下）。
-                if (noop == null) {
+                if (noop == null && !payloadNative) {
                     // ★★ 载荷模式：把 <clinit> 改名为 tvboxClinit，并在类尾合成一个新的 <clinit>
                     //    经 NativeBridge.clinitRun(...) 反射调用它 —— 失败在 **Java 侧**被捕获成一条
                     //    中文日志（见 ClinitGuard 注释：缺库不该炸掉整条线程）。
                     boolean clinit = hookLoads && "<clinit>".equals(name) && "()V".equals(descriptor);
                     if (clinit) clinitRenamed[0] = true;
                     return neutralize(super.visitMethod(access, clinit ? CLINIT_BODY : name, descriptor, signature, exceptions),
-                            skippedLoads, hookLoads);
+                            skippedLoads, hookLoads, dynamic);
                 }
                 if ((access & Opcodes.ACC_STATIC) == 0) {
                     throw new IllegalStateException("只改写静态 native 方法: " + owner + "." + name + descriptor);
@@ -231,7 +239,8 @@ public final class NativePatcher {
                 return new MethodVisitor(Opcodes.ASM9) {
                     @Override
                     public void visitEnd() {
-                        emitBody(sink, owner, name, descriptor, noop, hookLoads ? INVOKE_PAYLOAD : "invoke");
+                         emitBody(sink, owner, name, descriptor, Boolean.TRUE.equals(noop),
+                                 payloadNative ? INVOKE_PAYLOAD : (hookLoads && !dynamic ? INVOKE_PAYLOAD : "invoke"));
                         sink.visitEnd();
                     }
                 };
@@ -267,23 +276,27 @@ public final class NativePatcher {
      *   所以载荷层把 `System.load(String)` 换成 `NativeBridge.bridgeLoad(path)`（记录 + 装载）；
      *   `Runtime.load(String)` 用 SWAP+POP 去掉接收者后同样转成 bridgeLoad；其余形态照旧弹出。
      */
-    private static MethodVisitor neutralize(MethodVisitor mv, int[] counter, boolean hookLoads) {
+    private static MethodVisitor neutralize(MethodVisitor mv, int[] counter, boolean hookLoads, boolean dynamic) {
         if (mv == null) return null;
         return new MethodVisitor(Opcodes.ASM9, mv) {
             @Override
             public void visitMethodInsn(int opcode, String owner, String name, String desc, boolean itf) {
                 if (isLibLoad(owner, name)) {
                     // ★ 只钩 `load(String)`（路径）；`loadLibrary(String)` 传的是库名，取不到文件 → 照旧弹出
-                    if (hookLoads && "load".equals(name) && "(Ljava/lang/String;)V".equals(desc)) {
+                    if ("load".equals(name) && "(Ljava/lang/String;)V".equals(desc)) {
+                        // Embedded guard libraries are already loaded by prepare(), but
+                        // a later System.load can refer to a completely different sidecar.
+                        String loadMethod = !hookLoads ? "bridgeLoadEmbedded"
+                                : (dynamic ? "bridgeLoadDynamic" : "bridgeLoad");
                         if (opcode == Opcodes.INVOKESTATIC) { // System.load(path)
-                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, "bridgeLoad", "(Ljava/lang/String;)V", false);
+                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, loadMethod, "(Ljava/lang/String;)V", false);
                             counter[0]++;
                             return;
                         }
                         if (opcode == Opcodes.INVOKEVIRTUAL) { // Runtime.load(path)：栈 [recv, path] → [path]
                             mv.visitInsn(Opcodes.SWAP);
                             mv.visitInsn(Opcodes.POP);
-                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, "bridgeLoad", "(Ljava/lang/String;)V", false);
+                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, loadMethod, "(Ljava/lang/String;)V", false);
                             counter[0]++;
                             return;
                         }

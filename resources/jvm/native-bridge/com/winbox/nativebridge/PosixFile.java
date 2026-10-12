@@ -57,7 +57,8 @@ public class PosixFile extends File {
     /** 真实落盘的宿主位置（= 来宾 FS 对同一来宾路径的映射） */
     private File host() {
         File r = rootfs;
-        return r == null ? this : new File(r, posix);
+        // Never return this: exists()/mkdirs()/... would call their own overrides recursively.
+        return r == null ? new File(posix) : new File(r, posix);
     }
 
     @Override

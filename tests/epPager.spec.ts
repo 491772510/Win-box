@@ -1,6 +1,27 @@
 // tests/epPager.spec.ts — 详情页剧集分页（★ 2026-09-30 用户要求：每页有上限、多的翻页）
 import { describe, expect, it } from 'vitest';
-import { EP_PAGE_SIZE, clampEpPage, epPageCount, epPageSlice } from '../src/renderer/lib/epPager';
+import { EP_PAGE_SIZE, clampEpPage, epPageCount, epPageRanges, epPageSlice } from '../src/renderer/lib/epPager';
+
+describe('集数区间快速选择', () => {
+  it('区间覆盖每集一次，末组显示实际集数', () => {
+    expect(epPageRanges(120)).toEqual([
+      { page: 0, label: '1-50' }, { page: 1, label: '51-100' }, { page: 2, label: '101-120' },
+    ]);
+    const items = Array.from({ length: 151 }, (_, i) => i + 1);
+    const ranges = epPageRanges(items.length);
+    expect(ranges.map((r) => r.label)).toEqual(['1-50', '51-100', '101-150', '151-151']);
+    expect(ranges.flatMap((r) => epPageSlice(items, r.page).items)).toEqual(items);
+  });
+
+  it('空列表、整组与自定义大小', () => {
+    expect(epPageRanges(0)).toEqual([]);
+    expect(epPageRanges(-1)).toEqual([]);
+    expect(epPageRanges(Number.NaN)).toEqual([]);
+    expect(epPageRanges(50)).toEqual([{ page: 0, label: '1-50' }]);
+    expect(epPageRanges(100).map((r) => r.label)).toEqual(['1-50', '51-100']);
+    expect(epPageRanges(5, 2).map((r) => r.label)).toEqual(['1-2', '3-4', '5-5']);
+  });
+});
 
 describe('epPageCount — 每页上限与总页数', () => {
   it('默认每页 50 集；整除/不整除/空列表', () => {

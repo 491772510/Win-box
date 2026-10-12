@@ -670,6 +670,20 @@ describe('SourceViewModel — type3 play 归一化（P1-2 normalizeSpiderPlay �
     const empty = await playVia('');
     expect(empty).toMatchObject({ parse: 0, url: '' });
   });
+
+  it('AppGet 空结果保留 JVM 超时原因，有地址或显式提示时不套用旧原因', async () => {
+    const reason = '蜘蛛调用超时（>15s），源站可能无响应';
+    const run = (json: string) => {
+      class TimedOutSpider extends PlayStubSpider {
+        override get lastReason() { return reason; }
+      }
+      const sp = new TimedOutSpider(json);
+      return vmWithSpider(sp).play({ key: 'moli', type: 3, api: 'csp_AppGet', playUrl: '' } as SourceBean, '4K', 'ep', []);
+    };
+    expect(await run('')).toMatchObject({ parse: 1, url: '', message: reason });
+    expect(await run('{"parse":0,"url":"https://media.test/a.m3u8"}')).toMatchObject({ parse: 0, url: 'https://media.test/a.m3u8' });
+    expect((await run('{"url":"","msg":"源端提示"}')).message).toBe('源端提示');
+  });
 });
 
 describe('SourceViewModel — type 0/1 CMS 网络失败包成 NETWORK（任务 A1）', () => {

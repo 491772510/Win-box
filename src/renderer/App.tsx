@@ -111,43 +111,6 @@ const AP_GROUPS: { label: string; items: typeof NAV }[] = [
 ];
 
 /**
- * ★ 2026-10-08：豆风（豆风 = Material You × 豆瓣）右下角**浮动圆钮**的图标 ——
- *   一色线性 SVG（20px / 1.6 描边），对应参考图右下角的「浏览 / 历史 / 设置」圆钮组。
- */
-const DB_FAB_ICONS: Record<'discover' | 'vod' | 'history' | 'config', React.ReactNode> = {
-  // 发现（浏览）= 四宫格
-  discover: (
-    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <rect x="3" y="3" width="5.8" height="5.8" rx="1.9" />
-      <rect x="11.2" y="3" width="5.8" height="5.8" rx="1.9" />
-      <rect x="3" y="11.2" width="5.8" height="5.8" rx="1.9" />
-      <rect x="11.2" y="11.2" width="5.8" height="5.8" rx="1.9" />
-    </svg>
-  ),
-  // 点播 = 播放页（发现被关掉时顶替第一枚）
-  vod: (
-    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
-      <rect x="2.6" y="4" width="14.8" height="12" rx="3" />
-      <path d="M8.3 7.6v4.8l4.2-2.4-4.2-2.4Z" fill="currentColor" stroke="none" />
-    </svg>
-  ),
-  // 历史 = 时钟
-  history: (
-    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
-      <circle cx="10" cy="10" r="7.2" />
-      <path d="M10 5.9v4.3l2.9 1.9" />
-    </svg>
-  ),
-  // 配置 = 齿轮
-  config: (
-    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-      <path d="m8.3 2.5-.5 1.8-1.5.9-1.8-.5-1.7 2.9 1.3 1.3v2.2l-1.3 1.3 1.7 2.9 1.8-.5 1.5.9.5 1.8h3.4l.5-1.8 1.5-.9 1.8.5 1.7-2.9-1.3-1.3V8.9l1.3-1.3-1.7-2.9-1.8.5-1.5-.9-.5-1.8Z" strokeLinejoin="round" />
-      <circle cx="10" cy="10" r="2.6" />
-    </svg>
-  ),
-};
-
-/**
  * 页面外壳（布局路由）：承载「页面切换过渡动画」。
  * ★ 2026-09-24（用户定稿）：以 pathname 为 key → 切页时容器重建并播放一次入场动画（淡入 + 轻微上移，苹果 / Netflix 式）。用布局路由 + Outlet 而非嵌套 Routes，
  *   避免相对路径解析问题；query 变化（如 HomePage 清 `?agg=`）不改 pathname → 不重播动画。
@@ -603,17 +566,8 @@ function AppShell() {
    *   （Material You × 豆瓣；样式全部在 douban.css）：
    *   ① `.db-head` = 顶栏（深蓝品牌胶囊「WIN-BOX」+ 页面标题 + 搜索/换源 + 窗口控制）＋ 胶囊导航条；
    *   ② `.db-main` = 路由内容（页面自身 topbar / 网格 / 卡片照常，配色由皮肤转浅）；
-   *   ③ `.db-fabs` = 右下角浮动圆钮（发现 / 历史 / 配置，参考图的三枚圆钮 + 圆下小字标签）。
    */
   if (douban) {
-    const fabs: { to: string; label: string; icon: React.ReactNode; active: boolean }[] = [
-      // 「发现」被配置关掉时，第一位换成「点播」（同一位置不出现死链按钮）
-      showDiscover
-        ? { to: '/', label: '发现', icon: DB_FAB_ICONS.discover, active: loc.pathname === '/' }
-        : { to: '/home', label: '点播', icon: DB_FAB_ICONS.vod, active: loc.pathname === '/home' },
-      { to: '/history', label: '历史', icon: DB_FAB_ICONS.history, active: loc.pathname.startsWith('/history') },
-      { to: '/config', label: '配置', icon: DB_FAB_ICONS.config, active: loc.pathname.startsWith('/config') },
-    ];
     return (
       <div className="app db-app">
         {disclaim && DisclaimerModal}
@@ -639,20 +593,6 @@ function AppShell() {
           </nav>
         </header>
         <main className="db-main">{routesNode}</main>
-        {/* 浮动圆钮：整组 fixed 在右下角（内容区已留底部空间，见 douban.css 的 .content padding） */}
-        <div className="db-fabs">
-          {fabs.map((f) => (
-            <button
-              key={f.to}
-              className={'db-fab' + (f.active ? ' active' : '')}
-              title={f.label}
-              onClick={() => nav(f.to)}
-            >
-              <span className="db-fab-orb">{f.icon}</span>
-              <span className="db-fab-label">{f.label}</span>
-            </button>
-          ))}
-        </div>
       </div>
     );
   }

@@ -258,7 +258,7 @@ app.whenReady().then(async () => {
   // ★ 2026-10-09：构建标记 —— 日志排障第一行就能确认「跑的是哪只构建」。
   //   背景：同版本号覆盖安装时用户日志无法区分新旧产物（1.20.0 两轮都叫 1.20.0），
   //   此标记随每轮 main 改动手工递增（含当轮关键词，grep 即证）。
-    fileLogger.i('build: 20261012.1 release-1.20.10 (macOS T02: platform layer / dataDir no-relocate / darwin lifecycle / app menu / dep probe)');
+    fileLogger.i(`build: 20261012.1 release-${app.getVersion()} (macOS T02: platform layer / dataDir no-relocate / darwin lifecycle / app menu / dep probe)`);
 
   // ★ 2026-10-12（macOS 适配 P1-1）：安装 macOS 应用菜单（App / 编辑 / 窗口 / 帮助）。
   //   **非 darwin 内部直接 no-op** —— Windows 完全无感（全应用零菜单的现状保持不变）。

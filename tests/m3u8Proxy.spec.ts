@@ -77,6 +77,24 @@ beforeAll(async () => {
         '#EXT-X-MAP:URI="init.mp4' + tokenQuery + '"\n#EXTINF:1,\nseg-01.ts' + tokenQuery + '\n#EXT-X-ENDLIST\n');
       return;
     }
+    if (path === '/webp-list.m3u8') {
+      res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+      res.end('#EXTM3U\n#EXTINF:5,\nwebp-segment.webp\n#EXT-X-ENDLIST\n');
+      return;
+    }
+    if (path === '/webp-segment.webp') {
+      const ts = Buffer.alloc(188 * 5, 0xaa);
+      for (let i = 0; i < 5; i++) ts[i * 188] = 0x47;
+      const prefix = Buffer.alloc(936);
+      prefix.write('RIFF', 0); prefix.writeUInt32LE(prefix.length + ts.length - 8, 4);
+      prefix.write('WEBP', 8); prefix.write('VP8 ', 12); prefix.writeUInt32LE(908, 16);
+      prefix.write('TS_D', 928); prefix.writeUInt32LE(ts.length, 932);
+      res.writeHead(200, { 'Content-Type': 'image/webp', 'Content-Length': String(prefix.length + ts.length) });
+      res.write(prefix.subarray(0, 2));
+      // A short RIFF head must not stop sniffing before the complete envelope.
+      setTimeout(() => res.end(Buffer.concat([prefix.subarray(2), ts])), 10);
+      return;
+    }
     if (path === '/hls/media/key.bin' || path === '/hls/media/init.mp4' || path === '/hls/media/seg-01.ts') {
       const body = Buffer.from(path.endsWith('key.bin') ? 'fixture-key-12345' : 'fixture-segment');
       const range = req.headers.range;
@@ -109,6 +127,18 @@ afterAll(async () => {
 });
 
 describe('CatVod do=m3u8', () => {
+  it('WebP TS_D 分片流式剥离前导、正确 MIME/长度，且使用 .ts 路由', async () => {
+    const playlist = await (await fetch(proxyUrl('/webp-list.m3u8'))).text();
+    const segment = playlist.split('\n').find(line => line.startsWith('http'))!;
+    expect(new URL(segment).pathname).toBe('/play/segment.ts');
+    const response = await fetch(segment);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('video/mp2t');
+    expect(response.headers.get('content-length')).toBe(String(188 * 5));
+    const body = Buffer.from(await response.arrayBuffer());
+    expect(body.length).toBe(188 * 5);
+    for (let i = 0; i < 5; i++) expect(body[i * 188]).toBe(0x47);
+  });
   it('以 JAR 实际协议拉取重定向清单、子清单、key、初始化段和分片', async () => {
     const response = await fetch(proxyUrl('/entry' + tokenQuery));
     expect(response.status).toBe(200);

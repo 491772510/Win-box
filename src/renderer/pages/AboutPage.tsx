@@ -19,7 +19,7 @@ export default function AboutPage() {
   const mac = isMacRenderer();
   return (
     <>
-      <div className="topbar">
+      <div className="topbar" style={{ justifyContent: 'center' }}>
         <h2 style={{ margin: 0, fontSize: 16 }}>说明 · 免责声明</h2>
       </div>
       <div className="content about">

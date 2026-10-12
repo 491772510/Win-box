@@ -130,6 +130,20 @@ describe('classifyPlayLink — 协议识别结论', () => {
 describe('SpiderHost.playInner 接线（经 play() 全链）', () => {
   const dir = (): string => (globalThis as unknown as { __shostDir: string }).__shostDir;
 
+  it.each(['', 'parse_api=8d112d1d&url=encrypted&token=|爱情怎么翻译|1', '/mizhicdn/video/error.mp4',
+    'https://cdn.test/mizhicdn/video/error.mp4'])('日志中的无效取链结果转为明确失败：%s', async url => {
+    const host = new SpiderHost();
+    const key = `badPlay-${url.length}`;
+    host.cfgAddSource({ key, name: '魔方', type: 3, api: 'https://mock.test/m.js' } as SourceBean);
+    (host as unknown as { vm: { play: unknown } }).vm = {
+      play: async () => ({ parse: 0, url, playUrl: '', flag: '4K线路JD', jx: 0 }),
+    };
+    const result = await host.play(key, '4K线路JD', 'parse_api=original&url=encrypted');
+    expect(result.parse).toBe(1);
+    expect(result.url).toBe('');
+    expect(result.message).toBeTruthy();
+  });
+
   it('m3u8 代理包装保留完整查询、额外请求头及原始选集参数', async () => {
     try {
       const host = new SpiderHost();

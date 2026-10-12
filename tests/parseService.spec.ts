@@ -46,6 +46,20 @@ describe('unwrapRelayUrl — 还原本地 /play 中继包装', () => {
 });
 
 describe('ParseService — 解析接口链', () => {
+  it('JSON 或嗅探返回错误占位视频时继续尝试下一接口', async () => {
+    const target = 'https://video.test/watch.html';
+    const error = 'https://cdn.test/mizhicdn/video/error.mp4';
+    const svc = new ParseService(fakeHttp({
+      [buildParseUrl('https://jx.test/api', target)]: JSON.stringify({ url: error }),
+    }), logger, async page => ({ url: page.startsWith('https://good.test/') ? 'https://cdn.test/real.m3u8' : error, headers: {} }));
+    const result = await svc.resolve([
+      P({ url: 'https://jx.test/api', type: 1 }),
+      P({ url: 'https://bad.test/?url=', type: 0 }),
+      P({ name: '有效解析', url: 'https://good.test/?url=', type: 0 }),
+    ], target);
+    expect(result?.url).toBe('https://cdn.test/real.m3u8');
+    expect(result?.via).toBe('sniff:有效解析');
+  });
   it('已是媒体地址 → 直接返回（不请求、不嗅探）', async () => {
     const calls: string[] = [];
     const svc = new ParseService(fakeHttp({}), logger, fakeSniff(null, calls));

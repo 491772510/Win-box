@@ -14,6 +14,11 @@ import android.view.Window;
 public class Activity extends android.content.Context {
 
     private final Window window = new Window();
+    private final Application application = new Application();
+
+    public Application getApplication() {
+        return application;
+    }
 
     public Activity() {
         super();

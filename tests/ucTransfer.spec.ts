@@ -19,6 +19,13 @@ describe('isUcSharePlay', () => {
 });
 
 describe('extractUcShare', () => {
+  it('按明确 UC 线路解析潇洒玩偶复合选集，不误识别其他提供商', () => {
+    const id = '03~4K.mp4[1.01GB]__' + 'a'.repeat(32) + '+11adf8105c314+' + 'b'.repeat(32);
+    expect(extractUcShare(id, 'UC无限#5')).toEqual({ pwdId: '11adf8105c314', passcode: '' });
+    expect(extractUcShare(id, '优汐无限1')).toEqual({ pwdId: '11adf8105c314', passcode: '' });
+    expect(extractUcShare(id, '夸克无限#4')).toBeNull();
+    expect(extractUcShare(id)).toBeNull();
+  });
   it('明确 UC/优汐线路的 sId/fid 描述不再误判成夸克，但无线路上下文不猜', () => {
     const d = JSON.stringify({ sId: 'uc-share-1', fid: 'file-2', file_name: '02.mkv' });
     expect(extractUcShare(d, '优汐无限1')).toEqual({ pwdId: 'uc-share-1', passcode: '' });
@@ -70,6 +77,11 @@ describe('UC 精确选集取链（不触网）', () => {
         return new Response(JSON.stringify({ code: 0, data: { stoken: 'share-session' } }));
       }
       if (url.pathname.endsWith('/share/sharepage/detail')) {
+        expect(url.searchParams.get('pr')).toBe('UCBrowser');
+        expect(url.searchParams.get('fr')).toBe('pc');
+        expect(url.searchParams.get('_fetch_total')).toBe('1');
+        expect(url.searchParams.get('pwd_id')).toBe('ucshare123');
+        expect(url.searchParams.get('stoken')).toBe('share-session');
         return new Response(JSON.stringify({ code: 0, data: { list: files } }));
       }
       if (url.pathname.endsWith('/file/download')) {
@@ -110,7 +122,7 @@ describe('UC 精确选集取链（不触网）', () => {
       }
       if (url.pathname.endsWith('/file/download')) {
         return new Response(JSON.stringify({ code: 0, data: [{ download_url: 'https://media.test/file-1' }] }), {
-          headers: { 'set-cookie': '__puus=refreshed; Path=/' },
+          headers: [['set-cookie', '__puus=refreshed; Path=/'], ['set-cookie', 'session=new; Path=/']],
         });
       }
       throw new Error(`Unexpected request ${url.pathname} ${JSON.stringify(body)}`);
@@ -119,7 +131,7 @@ describe('UC 精确选集取链（不触网）', () => {
 
     const r = await ucResolveShare('ucshare123', '', 'account=one', { innerFid: 'file-1', logger: quiet });
     expect(r).toMatchObject({ ok: true, url: 'https://media.test/file-1' });
-    expect(r.header.Cookie).toBe('account=one; __puus=refreshed');
+    expect(r.header.Cookie).toBe('account=one; __puus=refreshed; session=new');
   });
 
   it('已选 fid 不存在或多文件未选集时拒绝默认首集，不请求下载或转存', async () => {
@@ -127,6 +139,42 @@ describe('UC 精确选集取链（不触网）', () => {
     expect((await ucResolveShare('ucshare123', '', 'test-cookie', { innerFid: 'missing', logger: quiet })).ok).toBe(false);
     expect((await ucResolveShare('ucshare123', '', 'test-cookie', { logger: quiet })).ok).toBe(false);
     expect(fetch.mock.calls.some(([url]) => /\/(download|save)$/.test(new URL(String(url)).pathname))).toBe(false);
+  });
+
+  it('免转存拒绝后 task 查询参数完整，下载使用服务端落盘 fid', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      const reply = (data: unknown) => new Response(JSON.stringify(data));
+      if (url.pathname.endsWith('/share/sharepage/token')) return reply({ code: 0, data: { stoken: 'share-session' } });
+      if (url.pathname.endsWith('/share/sharepage/detail')) return reply({ code: 0, data: { list: files } });
+      if (url.pathname.endsWith('/share/sharepage/save')) return reply({ code: 0, data: { task_id: 'task-id' } });
+      if (url.pathname.endsWith('/task')) return reply({ code: 0, data: { status: 2, save_as: { save_as_top_fids: ['own-file-2'] } } });
+      if (url.pathname.endsWith('/file/download')) return reply(body.pwd_id
+        ? { code: 403 } : { code: 0, data: [{ download_url: `https://media.test/${body.fids[0]}` }] });
+      throw new Error(`Unexpected ${url.pathname}`);
+    });
+    vi.stubGlobal('fetch', fetch);
+    expect(await ucResolveShare('ucshare123', '', 'cookie', { innerFid: 'file-2' })).toMatchObject({
+      ok: true, fid: 'own-file-2', url: 'https://media.test/own-file-2',
+    });
+    const taskCall = fetch.mock.calls.find(([input]) => new URL(String(input)).pathname.endsWith('/task'));
+    const taskUrl = new URL(String(taskCall?.[0]));
+    expect(taskUrl.searchParams.get('task_id')).toBe('task-id');
+    expect(taskUrl.searchParams.get('retry_index')).toBe('0');
+    expect(taskUrl.searchParams.get('pr')).toBe('UCBrowser');
+    expect(taskUrl.searchParams.get('fr')).toBe('pc');
+  });
+
+  it('分享列表接口报错时不伪装成目标失效，也不请求下载或转存', async () => {
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/share/sharepage/token')) return new Response(JSON.stringify({ code: 0, data: { stoken: 'session' } }));
+      return new Response(JSON.stringify({ code: 403 }), { status: 403 });
+    });
+    vi.stubGlobal('fetch', fetch);
+    await expect(ucResolveShare('share', '', 'cookie', { innerFid: 'file-2' })).rejects.toThrow('UC 分享列表失败 HTTP 403');
+    expect(fetch.mock.calls).toHaveLength(2);
   });
 });
 

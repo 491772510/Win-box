@@ -32,15 +32,17 @@ public final class NativeBridgeMain {
      * rev3 = `.so` 落地改「同内容复用 + 内容寻址兜底」（修多进程 mmap 覆盖失败，见 NativeBridge.landSo）。
      * rev4 = 新增「库加载中性化」：被改写类里的 System/Runtime.load* 视为已加载（壳只差 System.load 就肯走原生路径）。
      */
-    private static final int BRIDGE_REV = 4;
+    // rev5: preserve sidecar load paths and route declarations absent from the guard to payload VM.
+    private static final int BRIDGE_REV = 5;
 
     /**
      * ★ 载荷补丁版本号（改写逻辑或产物格式一变就 +1）：解密 dex 的产物补丁参与状态键，
      * 否则升级后（jar 体积/时间没变）会复用旧补丁，修好的逻辑不生效。
      * rev1 = 载荷层首版：全量 native → `NativeBridge.invokePayload`；`System.load(String)` → `bridgeLoad`。
      * rev2 = `<clinit>` 改名 + 合成受保护的新 `<clinit>`（缺库不再抛 ExceptionInInitializerError，失败点前移到调用处）。
+     * rev4 = class-literal clinit callback + separate dynamic outer guard VM (aowu).
      */
-    private static final int PAYLOAD_REV = 3;
+    private static final int PAYLOAD_REV = 4;
 
     private NativeBridgeMain() {
     }
@@ -74,6 +76,16 @@ public final class NativeBridgeMain {
     public static void rebind(File jar, File workDir, ClassLoader resolver) throws Exception {
         if (!NativeBridge.available() || jar == null || workDir == null || resolver == null) return;
         NativeBridge.init(jar, workDir, resolver);
+    }
+
+    /** No embedded .so: keep the loader/work context and hook the library path when System.load runs. */
+    public static File prepareDynamic(File jar, File workDir, ClassLoader resolver) {
+        arm(jar, workDir, resolver);
+        return patchRuntimeJar(jar, true);
+    }
+
+    public static boolean hasNativeMethods(File jar) throws Exception {
+        return !NativeBridge.scanNativeMethods(jar).isEmpty();
     }
 
     public static String prepare(File jar, File workDir, File outDir, ClassLoader resolver) throws Exception {
@@ -135,13 +147,17 @@ public final class NativeBridgeMain {
      * @return 补丁目录；无需补丁（无 native 也无库加载调用）或失败时返回 null（调用方原样加载）
      */
     public static File patchRuntimeJar(File jar) {
+        return patchRuntimeJar(jar, false);
+    }
+
+    private static File patchRuntimeJar(File jar, boolean dynamic) {
         try {
             if (jar == null || !jar.isFile() || !NativeBridge.available()) return null;
             String cacheProp = System.getProperty("tvbox.d2j.cache", "").trim();
             if (cacheProp.isEmpty()) return null; // 宿主未注入 d2j 缓存（无原生桥的普通运行）
             File cache = new File(cacheProp);
             if (!cache.isDirectory() && !cache.mkdirs()) return null;
-            File outDir = new File(cache, jar.getName() + ".patched");
+            File outDir = new File(cache, jar.getName() + (dynamic ? ".dynamic" : "") + ".patched");
             String cheap = PAYLOAD_REV + "/" + jar.length() + "/" + jar.lastModified();
             File stamp = new File(cache, outDir.getName() + ".ok");
             File lockPath = new File(cache, outDir.getName() + ".lock");
@@ -154,7 +170,7 @@ public final class NativeBridgeMain {
                 if (hasArtifacts(outDir) && readText(stamp).startsWith(cheap + "/")) return outDir;
                 deleteRecursively(outDir);
                 if (!outDir.exists() && !outDir.mkdirs()) return null;
-                written = patchPayloadWith(jar, outDir);
+                written = patchPayloadWith(jar, outDir, dynamic);
                 if (written <= 0) {
                     deleteRecursively(outDir); // 该产物没有需要改写的类 → 不留空目录（否则会遮蔽原 jar 的目录语义）
                     return null;
@@ -171,10 +187,10 @@ public final class NativeBridgeMain {
     }
 
     /** 帧计算用的解析加载器：能看见该 dex 自己的类（否则改写时父类全退化成 Object，帧计算容易错） */
-    private static int patchPayloadWith(File jar, File outDir) throws Exception {
+    private static int patchPayloadWith(File jar, File outDir, boolean dynamic) throws Exception {
         URLClassLoader resolver = new URLClassLoader(new URL[]{jar.toURI().toURL()}, NativeBridgeMain.class.getClassLoader());
         try {
-            return NativePatcher.patchPayload(jar, outDir, resolver);
+            return dynamic ? NativePatcher.patchDynamic(jar, outDir, resolver) : NativePatcher.patchPayload(jar, outDir, resolver);
         } finally {
             try {
                 resolver.close();

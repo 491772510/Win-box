@@ -131,7 +131,10 @@ export class SourceViewModel {
     if (type === 3) {
       const sp = this.factory.getCSP(bean, this.host);
       const json = await Promise.resolve(sp.playerContent(flag, id, vipFlags));
-      return this.normalizeSpiderPlay(json, flag, playUrl);
+      const result = this.normalizeSpiderPlay(json, flag, playUrl);
+      // JVM 超时/加载失败常返回空串；保留已有的原生解链兜底，但不能丢掉失败原因。
+      const reason = !result.url && !result.message ? this.spiderReason(sp) : '';
+      return reason ? { ...result, parse: 1, message: reason } : result;
     }
     // type 0/1/4：直连
     const url = playUrl && playUrl.includes('{playUrl}') ? playUrl.replace('{playUrl}', id) : id;

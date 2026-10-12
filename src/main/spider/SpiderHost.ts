@@ -56,6 +56,7 @@ import {
   wrapPlayUrlWithHeaders,
 } from '../../shared/driveProvider';
 import { join, dirname } from 'node:path';
+import { directPlayUrlError } from '../../shared/playbackResult';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { JarSpiderBridge, normalizeJarUrl } from '../../engine/spider/JarSpiderBridge';
 import {
@@ -1181,10 +1182,10 @@ export class SpiderHost {
    *   此前 do=pan 分发只有百度 / UC 两条通道：site=quark 的线路**必然双未识别**并上屏
    *   「百度：未识别；UC：未识别」（正是用户看到的文案）。
    */
-  private async quarkFromPanUrl(url: string, flag: string, miss?: string[]): Promise<PlayResult | null> {
-    let share = extractQuarkShare(url);
-    let innerFid = extractEpisodeFid(url);
-    const innerName = extractEpisodeName(url);
+  private async quarkFromPanUrl(url: string, flag: string, miss?: string[], episodeId = ''): Promise<PlayResult | null> {
+    let share = extractQuarkShare(episodeId, flag) || extractQuarkShare(url, flag);
+    let innerFid = extractEpisodeFid(episodeId) || extractEpisodeFid(url);
+    const innerName = extractEpisodeName(episodeId) || extractEpisodeName(url);
     // ★ 2026-10-09：jar 的 `do=pan&site=quark` **不给分享 URL**，只给三个裸参数
     //   （实测：`shareId=e8ac5a87aa2e`（12 位 = pwd_id）、`fileId=2e3ad195….d30d`（32 位 = fid））。
     //   此前只认 `pan.quark.cn/s/<id>` → **必然「未识别」**（用户报「site=quark」播不了）。
@@ -1193,7 +1194,7 @@ export class SpiderHost {
       const pan = parsePanProxyQuery(url);
       const sid = String(pan.shareId || '').trim();
       const fid = String(pan.fileId || '').trim();
-      if (/^[0-9a-f]{10,}$/i.test(sid)) {
+      if (/^quark/i.test(pan.site || '') && /^[0-9a-f]{10,}$/i.test(sid)) {
         share = { sId: sid, passcode: '' };
         if (!innerFid && /^[0-9a-f]{20,}$/i.test(fid)) innerFid = fid;
       }
@@ -2041,7 +2042,11 @@ export class SpiderHost {
   async play(key: string, flag: string, id: string): Promise<PlayResult> {
     const t = diagTimer();
     try {
-      const r = await this.playInner(key, flag, id);
+      let r = await this.playInner(key, flag, id);
+      if (r.parse === 0) {
+        const error = directPlayUrlError(r.url);
+        if (error) r = { ...r, parse: 1, url: '', playUrl: '', message: r.message || error };
+      }
       logPlayDiag({
         kind: 'play',
         stage: 'done',
@@ -2116,9 +2121,9 @@ export class SpiderHost {
         message: `UC 网盘取流失败（${miss.join('；') || '分享文件解链失败'}）` };
     }
     // Native Quark resolution precedes playerContent and JVM self-resolution.
-    if (isQuarkSharePlay(id) || /^quark/i.test(parsePanProxyQuery(id).site || '')) {
+    if (isQuarkSharePlay(id, flag) || /^quark/i.test(parsePanProxyQuery(id).site || '')) {
       const miss: string[] = [];
-      const got = await this.quarkFromPanUrl(id, flag, miss);
+      const got = await this.quarkFromPanUrl(id, flag, miss, id);
       if (got) return got;
       return { parse: 1, url: '', playUrl: '', flag, jx: 0,
         ...(!this.driveList()['quark'] ? { needDriveCookieBind: 'quark' } : {}),
@@ -2130,11 +2135,11 @@ export class SpiderHost {
     let quarkFail = '';
     // ★ 夸克分享型播放（episode 是 pan.quark.cn/s/ 链接或含 sId 的 JSON）且已绑定夸克 →
     //   用原生 quarkTransfer 复刻「分享→转存→直链」，绕开超时的 fty jar 与被 pin 的主机。
-    if (isQuarkSharePlay(id)) {
+    if (isQuarkSharePlay(id, flag)) {
       const quarkCookie = (this.driveList() as Record<string, string>)['quark'] || '';
       if (quarkCookie) {
-        const m = /pan\.quark\.cn\/s\/([^\/#\s]+)/i.exec(id) || /"sId":\s*"([^"]+)"/.exec(id);
-        const pwdId = m ? m[1] : '';
+        const share = extractQuarkShare(id, flag);
+        const pwdId = share?.sId || '';
         if (pwdId) {
           try {
             // ★ 修复「点第6集落盘第29集」：fid 提取兼容 fid/vfid/file_id/URL 参数（旧正则只认 "fid"）
@@ -2142,7 +2147,7 @@ export class SpiderHost {
             // ★ 2026-09-29：集名一并传入 —— fid 在分享内匹配不到时按「集名/集号唯一匹配」兜底
             // ★ 2026-10-09：提取码（若有）透传 —— 带码分享的 share/token 请求必带正确 passcode
             const t = await quarkTransfer(pwdId, quarkCookie, {
-              passcode: extractQuarkShare(id)?.passcode || '',
+              passcode: share?.passcode || '',
               innerFid,
               innerName: extractEpisodeName(id),
               logger: fileLogger,
@@ -2186,7 +2191,7 @@ export class SpiderHost {
     let ucFail = '';
     if (isUcSharePlay(id)) {
       const ucCookie = (this.driveList() as Record<string, string>)['uc'] || '';
-      const share = extractUcShare(id);
+      const share = extractUcShare(id, flag);
       if (!ucCookie) {
         ucFail = '未绑定 UC 账号（Cookie 缺失）';
       } else if (share) {
@@ -2375,7 +2380,7 @@ export class SpiderHost {
               ? await this.baiduFromPanUrl(r.url, flag, miss, jvmPort, id)
               : ch === 'uc'
                 ? await this.ucFromPanUrl(r.url, flag, miss, id)
-                : await this.quarkFromPanUrl(r.url, flag, miss);
+                : await this.quarkFromPanUrl(r.url, flag, miss, id);
           if (got) return got;
         }
         if (!miss.length) miss.push(`未识别分享链接（site=${site || '未知'}）`);

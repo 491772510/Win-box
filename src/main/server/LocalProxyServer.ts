@@ -293,7 +293,7 @@ export class LocalProxyServer {
         res.end('ok');
         return;
       }
-      if (u.pathname === '/play') {
+      if (u.pathname === '/play' || u.pathname === '/play/segment.ts') {
         return await this.playProxy(u, req, res);
       }
       if (u.pathname === '/img') {
@@ -841,7 +841,7 @@ private imgProxy(u: URL, res: ServerResponse): void {
     //   ★ 带偏移的 Range 请求不嗅探（HLS 拖动 = 重开分片，实测 mpv/ffmpeg 均从 0 开始取）。
     if (resp.status < 400 && resp.body && (rng === '' || parseByteRange(rng)?.start === 0)) {
       const head = await this.readHead(resp.body as unknown as NodeJS.ReadableStream, DETECT_HEAD_LEN, (b) => {
-        if (b.length >= 2 && !((b[0] === 0xff && b[1] === 0xd8) || (b[0] === 0x89 && b[1] === 0x50))) return true;
+        if (b.length >= 2 && !((b[0] === 0xff && b[1] === 0xd8) || (b[0] === 0x89 && b[1] === 0x50) || (b[0] === 0x52 && b[1] === 0x49))) return true;
         return imagePreludeLen(b) > 0; // 图片结束且 TS 对齐即停
       });
       const pre = head.length ? imagePreludeLen(head) : 0;
@@ -1384,7 +1384,16 @@ function wrapSegmentWithHeaders(url: string, headers: Record<string, string>, pr
     !/^(user-agent|referer|cookie|range)$/i.test(name),
   ));
   if (Object.keys(extra).length) p.set('headers', encodeProxyHeaders(extra));
-  return `${proxyBase}/play?${p.toString()}`;
+  // FFmpeg may prefer an image demuxer based on the final URL extension even
+  // after we strip the image envelope. Give disguised HLS media a TS path,
+  // while keeping the original upstream URL/signature untouched in the query.
+  let imageSegment = false;
+  try { imageSegment = /\.(?:webp|jpe?g|png)$/i.test(new URL(url).pathname); } catch { /* invalid upstream */ }
+  // libavformat also scans dots in the query when guessing a demuxer. Percent
+  // encode them for image media so only the .ts path is visible to that guess;
+  // URLSearchParams restores the exact upstream URL (including its signature).
+  const query = imageSegment ? p.toString().replace(/\./g, '%2E') : p.toString();
+  return `${proxyBase}${imageSegment ? '/play/segment.ts' : '/play'}?${query}`;
 }
 
 /** 读取不区分大小写的请求头。 */
@@ -1489,9 +1498,29 @@ export function jpegPreludeLen(head: Buffer): number {
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-/** 完整 JPEG/PNG 后紧接至少四个 TS 同步头才剥离；纯图片、截断或坏块均原样透传。 */
+/** JPEG/PNG 前导或 WebP 的尾部 TS_D 块；至少四个 TS 同步头才剥离。 */
 export function imagePreludeLen(head: Buffer): number {
   if (head[0] === 0xff && head[1] === 0xd8) return jpegPreludeLen(head);
+  if (head.length >= 20 && head.toString('ascii', 0, 4) === 'RIFF' && head.toString('ascii', 8, 12) === 'WEBP') {
+    // 摸鱼儿 JD4K：RIFF 长度包括 TS_D 数据，不能把 RIFF 末尾当图片末尾。
+    // 按 chunk 边界解析，不在 VP8 像素中搜索同步头或 TS_D 字符串。
+    const riffEnd = head.readUInt32LE(4) + 8;
+    let imageSeen = false;
+    for (let off = 12; off + 8 <= head.length && off + 8 <= riffEnd;) {
+      const kind = head.toString('ascii', off, off + 4);
+      const len = head.readUInt32LE(off + 4);
+      const payload = off + 8, end = payload + len + (len & 1);
+      if (end > riffEnd) return 0;
+      if (kind === 'TS_D') {
+        // 只接受末块完整 TS 载荷（无尾部图片块/奇数 padding），避免截掉其他数据。
+        return imageSeen && len >= 188 * 4 && len % 188 === 0 && end === riffEnd && isTsAligned(head, payload) ? payload : 0;
+      }
+      if (end > head.length) return 0;
+      if (kind === 'VP8 ' || kind === 'VP8L') imageSeen = true;
+      off = end;
+    }
+    return 0;
+  }
   if (head.length < 33 || !head.subarray(0, 8).equals(PNG_SIGNATURE)) return 0;
   // 首块必须是固定长度的 IHDR，再沿块长度走到 IEND；不能搜索像素数据中的同名字符串。
   if (head.readUInt32BE(8) !== 13 || head.toString('ascii', 12, 16) !== 'IHDR') return 0;

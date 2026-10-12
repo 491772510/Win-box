@@ -1,6 +1,7 @@
 // src/main/net/quarkTransfer.ts — 原生复刻夸克「分享→转存→直链」，用于夸克网盘源播放。
-// 所有端点都在 drive-pc.quark.cn（未被 cert-pinning），仅需 cookie + 特定 UA + Referer。
-// 六步：token → 分享文件列表(含 share_fid_token) → 专用落盘目录 → save(to_pdir_fid)
+// 分享下载走 drive-m.quark.cn；转存/个人盘走 drive-pc.quark.cn，需 cookie + UA + Referer。
+// 主路径：token → 分享文件列表(含 share_fid_token) → 分享免转存直链。
+// 失败后回退：专用落盘目录 → save(to_pdir_fid)
 //       → GET /1/clouddrive/task 轮询「服务器返回的 fid」 → download 直链。
 //
 // ★★ 2026-09-19 修复（用户实测：①自删无效 ②反而无法播放 ③误删网盘内其它资源）——
@@ -14,10 +15,14 @@
 //   · quarkTransfer 全局串行（互斥锁），防并发转存相互污染。
 import type { Logger } from '../../shared/types';
 import { diagTimer, logPlayDiag, redactUrl, shortHash } from '../util/playDiag';
+import { mergeSetCookies } from './cookieMerge';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch';
 const REF = 'https://pan.quark.cn/';
 const BASE = 'https://drive-pc.quark.cn/1/clouddrive';
+// 分享下载接口；实测大视频可能返回 23018（大小限制），仍需保留转存兜底。
+const SHARE_BASE = 'https://drive-m.quark.cn/1/clouddrive';
+const SHARE_DOWNLOAD_Q = '?pr=ucpro&fr=h5';
 // 依据 capture/_xfer.txt 抓包 + 权威实现：
 //  - share/token、share/detail、share/save 才带 __dt/__t（Cp0204 生成随机值；空值亦可工作）
 //  - file(建目录)、file/download、task(任务查询)、file/delete 只带基本 query（带 __dt/__t 会 400）
@@ -26,7 +31,7 @@ const QF = '?pr=ucpro&fr=pc&uc_param_str=';            // file 系 / task / dele
 /** 应用专用落盘目录名（用户可见、可自行清理；与用户自有文件隔离，杜绝误删） */
 export const QUARK_CACHE_DIR_NAME = 'Win-Box缓存';
 
-async function jpost(url: string, cookie: string | null, body: unknown, extraHeaders: Record<string, string> = {}): Promise<{ status: number; json: any; text: string; setCookie?: string }> {
+async function jpost(url: string, cookie: string | null, body: unknown, extraHeaders: Record<string, string> = {}): Promise<{ status: number; json: any; text: string; setCookie?: string; setCookies: string[] }> {
   const r = await globalThis.fetch(url, {
     method: 'POST',
     headers: { 'User-Agent': UA, 'Referer': REF, 'Content-Type': 'application/json', Origin: REF.replace(/\/$/, ''), ...(cookie ? { Cookie: cookie } : {}), ...extraHeaders },
@@ -36,7 +41,10 @@ async function jpost(url: string, cookie: string | null, body: unknown, extraHea
   let json: any = {};
   try { json = JSON.parse(text); } catch { /* 非 JSON */ }
   // ★ 捕获响应 Set-Cookie → 新版 __puus，供取流时使用（实测 download 会下发新 __puus）
-  return { status: r.status, json, text, setCookie: r.headers.get('set-cookie') || undefined };
+  const setCookie = r.headers.get('set-cookie') || undefined;
+  const setCookies = typeof r.headers.getSetCookie === 'function'
+    ? r.headers.getSetCookie() : setCookie ? [setCookie] : [];
+  return { status: r.status, json, text, setCookie, setCookies };
 }
 async function jget(url: string, cookie: string, extraHeaders: Record<string, string> = {}): Promise<{ status: number; json: any }> {
   const r = await globalThis.fetch(url, {
@@ -135,7 +143,12 @@ async function quarkTransferInner(
   const innerFid = shareFile.fid;
   const innerName = shareFile.name;
 
-  // 3) ★ 定位/创建「应用专用落盘基础目录」（root 下固定名，fid 弱指纹缓存 10 分钟），
+  // 3) ★ 分享免转存直链：不写入用户网盘、不需要清理。
+  //    夸克分享下载接口使用 fids_token（不是 file/download 的 fid_token_list）。
+  const direct = await quarkShareDirectLink(pwdId, stoken, shareFile, cookie, log);
+  if (direct) return direct;
+
+  // 4) ★ 定位/创建「应用专用落盘基础目录」（root 下固定名，fid 弱指纹缓存 10 分钟），
   //    并在其下为本次播放创建**唯一会话子目录** `tr_<ts>_<rand>`（对齐 YunX TEMP_SUBDIR_PREFIX）：
   //    · 每次转存落不同目录 → 即使上一次的文件因删除任务未完成仍残留，也不会产生同名冲突
   //      （否则"第一次能播、第二次转存同名 save 失败 → 无法播放"）；
@@ -144,14 +157,14 @@ async function quarkTransferInner(
   const cacheDirFid = await createSessionDir(cookie, baseDirFid, log);
   log.i(`quarkTransfer: 会话落盘目录 fid=${cacheDirFid.slice(0, 8)}... (base=${baseDirFid.slice(0, 8)}...)`);
 
-  // 3.5) before 快照（仅用于"task 查询失败"时的回退护栏；子目录刚建，before 应为空）
+  // 4.5) before 快照（仅用于"task 查询失败"时的回退护栏；子目录刚建，before 应为空）
   const beforeFids = new Set<string>();
   try {
     const before = await listDirFiles(cookie, cacheDirFid);
     for (const f of before) if (f?.fid) beforeFids.add(String(f.fid));
   } catch { /* 快照失败不阻塞主链路 */ }
 
-  // 4) 转存 save：★ 对齐 Cp0204/YunX —— to_pdir_fid（专用目录）+ fid_token_list + scene=link + pdir_fid='0'。
+  // 5) 转存 save：★ 对齐 Cp0204/YunX —— to_pdir_fid（专用目录）+ fid_token_list + scene=link + pdir_fid='0'。
   //    （不传 share_pwd/size 等非权威字段，避免被服务器作为转存参数误读；缺 scene 会 400。）
   const sv = await jpost(`${BASE}/share/sharepage/save${Q}`, cookie, {
     pwd_id: pwdId,
@@ -168,7 +181,7 @@ async function quarkTransferInner(
     return { url: '', header: {}, ok: false, reason: `转存save失败 ${sv.status}/${String(sv.text).slice(0,160)}` };
   }
 
-  // 5) ★ 转存 fid 以「服务器返回」为准：轮询 GET /1/clouddrive/task 直到完成，
+  // 6) ★ 转存 fid 以「服务器返回」为准：轮询 GET /1/clouddrive/task 直到完成，
   //    取 data.save_as.save_as_top_fids[0]（Cp0204/YunX 均用此 fid 直接 download）。
   //    task 查询失败（超时/异常）→ 回退「专用目录内 差集+文件名护栏」识别；
   //    护栏命中才继续，未命中 → 判失败（宁可拿不到，也绝不猜 fid → 绝不误删用户资源）。
@@ -179,7 +192,7 @@ async function quarkTransferInner(
   }
   if (!ownFid) return { url: '', header: {}, ok: false, reason: '转存未确认落盘 fid（请检查夸克 cookie 是否有效）' };
 
-  // 6) 出流：★ 用「download 响应下发的 __puus」取直链（真机验证：可 206，见 capture/mitm_capture.jsonl）。
+  // 7) 出流：★ 用「download 响应下发的 __puus」取直链（真机验证：可 206，见 capture/mitm_capture.jsonl）。
   //    ★ 优先走「加速节点」（对齐影视仓）：先 acquire_dl_token 拿 token，再带 speedup_session+token
   //      请求 download —— 实测普通节点 dl-pc-zb 仅 ~0.2MB/s，加速节点 dl-c-zb-u 快 ~7 倍。
   //      加速失败（接口异常/token 拿不到）自动回退普通 download，不影响可用性。
@@ -200,6 +213,46 @@ async function quarkTransferInner(
     playCookie = puus ? applyCookie(cookie, '__puus', puus) : cookie;
   }
   return { url, header: { Referer: REF, 'User-Agent': UA, Cookie: playCookie }, ok: true, fid: ownFid, pdirFid: cacheDirFid };
+}
+
+/**
+ * 分享文件免转存直链（失败返回 null，由调用方进入原有转存兜底）。
+ *
+ * 与本人盘的 /file/download 不同，token 字段为 fids_token。
+ * 真实账号探测大视频返回 HTTP 400/code 23018，不保证所有分享支持免转存。
+ */
+async function quarkShareDirectLink(
+  pwdId: string,
+  stoken: string,
+  file: QuarkShareFile,
+  cookie: string,
+  log: Logger,
+): Promise<QuarkTransferResult | null> {
+  if (!file.fid || !file.token) {
+    log.w('quarkTransfer: 分享文件缺 fid 或 share_fid_token，跳过免转存取链');
+    return null;
+  }
+  try {
+    const r = await jpost(`${SHARE_BASE}/file/share/download${SHARE_DOWNLOAD_Q}`, cookie, {
+      fids: [file.fid],
+      fids_token: [file.token],
+      pwd_id: pwdId,
+      stoken,
+    });
+    const url = String(r.json?.data?.[0]?.download_url || '');
+    if (!/^https?:\/\//i.test(url) || r.status !== 200 || r.json?.code !== 0) {
+      // 响应可能包含分享会话/token，只记录状态码。
+      const limit = r.json?.code === 23018 ? '，分享下载受文件大小限制' : '';
+      log.w(`quarkTransfer: 分享免转存未取到直链（HTTP ${r.status}, code=${r.json?.code ?? '-'}${limit}），回退转存`);
+      return null;
+    }
+    const playCookie = mergeSetCookies(cookie, r.setCookies);
+    log.i('quarkTransfer: 分享免转存取链成功');
+    return { url, header: { Referer: REF, 'User-Agent': UA, Cookie: playCookie }, ok: true };
+  } catch (e) {
+    log.w(`quarkTransfer: 分享免转存取链异常（${e instanceof Error ? e.message : String(e)}），回退转存`);
+    return null;
+  }
 }
 
 /** 分享列表分页 fetch 契约（可注入内存树供单测） */
@@ -633,9 +686,8 @@ function dirCacheKey(cookie: string): string {
 }
 
 /** 判断某播放 id 是否夸克分享（episode JSON 含 sId 或直达 pan.quark.cn/s/） */
-export function isQuarkSharePlay(id: string): boolean {
-  if (!id) return false;
-  return /pan\.quark\.cn\/s\//i.test(id) || /"sId":\s*"/i.test(id);
+export function isQuarkSharePlay(id: string, flag = ''): boolean {
+  return !!extractQuarkShare(id, flag);
 }
 
 /**
@@ -646,10 +698,15 @@ export function isQuarkSharePlay(id: string): boolean {
  * 背景：do=pan 的原生解链此前只有百度 / UC 两条通道，`site=quark` 的线路必然「双未识别」；
  * 且 `quarkTransferInner` 的 share/token 请求此前 passcode 恒空串 → **带码分享必失败**。
  */
-export function extractQuarkShare(text: string): { sId: string; passcode: string } | null {
+export function extractQuarkShare(text: string, flag = ''): { sId: string; passcode: string } | null {
+  const compound = extractCompoundPanEpisode(text);
+  if (compound && /^(?:quark|夸克)/i.test(flag)) return { sId: compound.shareId, passcode: '' };
   try {
     const obj = JSON.parse(text);
-    if (typeof obj.sId === 'string' && /^[a-z0-9]+$/i.test(obj.sId)) return { sId: obj.sId, passcode: String(obj.passcode || obj.pwd || '') };
+    // sId 是 UC/夸克共用字段；已明确其他提供商时不能仅凭 sId 误走夸克。
+    const provider = String(obj?.site || obj?.provider || obj?.flag || flag);
+    const otherDrive = /^(?:uc(?:\b|无限)|优汐|baidu|百度)/i.test(provider) || /(?:drive|fast)\.uc\.cn\/s\//i.test(text);
+    if (!otherDrive && typeof obj?.sId === 'string' && /^[a-z0-9]+$/i.test(obj.sId)) return { sId: obj.sId, passcode: String(obj.passcode || obj.pwd || '') };
   } catch { /* URL/text */ }
   let cur = String(text || '');
   for (let i = 0; i < 3 && cur; i++) {
@@ -678,8 +735,16 @@ export function extractQuarkShare(text: string): { sId: string; passcode: string
  * 只认 `"fid"` 会把字段名不同的传成 undefined → 转存落到「目录第一个文件」= 播第6集落第29集。
  * 按常见字段名逐一尝试；取不到返回 ''，多文件分享必须拒绝盲选。
  */
+/** 潇洒玩偶的选集协议：名称__分享内 fid+分享 ID+文件 token（只接受已观察到的完整格式）。 */
+export function extractCompoundPanEpisode(id: string): { name: string; fid: string; shareId: string } | null {
+  const m = /^(.*?)__([0-9a-f]{32})\+([0-9a-z]{10,32})\+([0-9a-f]{32})$/i.exec(String(id || ''));
+  return m?.[1] ? { name: m[1], fid: m[2], shareId: m[3] } : null;
+}
+
 export function extractEpisodeFid(id: string): string {
   if (!id) return '';
+  const compound = extractCompoundPanEpisode(id);
+  if (compound) return compound.fid;
   // JSON：fid / vfid / file_id（字符串或数组首元素）
   const pats = [
     /"fid"\s*:\s*"([^"]+)"/,
@@ -708,6 +773,8 @@ export function extractEpisodeFid(id: string): string {
  */
 export function extractEpisodeName(id: string): string {
   if (!id) return '';
+  const compound = extractCompoundPanEpisode(id);
+  if (compound) return compound.name;
   // 值里可能含转义引号（JSON 字符串）→ 用 `(?:[^"\\]|\\.)` 逐字符匹配
   const V = '((?:[^"\\\\]|\\\\.){1,120})';
   const pats = [
@@ -735,16 +802,23 @@ export function extractEpisodeName(id: string): string {
  *   纯函数、可单测；集号相同才算同一集（避免「同名不同集」误判）。
  */
 export function episodeKeyOf(name: string): string {
-  const s = String(name || '').trim();
+  // 先剥离源附加的大小和媒体扩展名，避免把 mp4 中的 4 当作集号。
+  const s = String(name || '').trim()
+    .replace(/\[\s*\d+(?:\.\d+)?\s*(?:[KMGT]i?B)\s*\]$/i, '')
+    .replace(/\.(?:mp4|mkv|avi|mov|m4v|ts|m2ts|flv|wmv|webm|m3u8)\s*$/i, '').trim();
   if (!s) return '';
   const se = /[Ss]\d{1,2}\s*[Ee]\s*0*(\d{1,4})/.exec(s);
   if (se) return `ep${Number(se[1])}`;
   const cn = /第\s*0*(\d{1,4})\s*[集话期]/.exec(s);
   if (cn) return `ep${Number(cn[1])}`;
-  const e = /[Ee][Pp]?\s*0*(\d{1,4})(?![0-9])/.exec(s);
+  const e = /(?:^|[^a-z0-9])[Ee][Pp]?\s*0*(\d{1,4})(?![0-9])/i.exec(s);
   if (e) return `ep${Number(e[1])}`;
+  // 真实 UC 文件名：03~4K(1).mp4、[剧名]03-4K.mp4[1.63GB]。
+  // 集号必须位于开头或分隔符之后、画质标记之前，不能取 4K/1080p 的数字。
+  const quality = /(?:^|[\]\s._-])0*(\d{1,3})[\s.~_-]+(?:4k|2k|2160p|1080p|720p)(?![a-z0-9])/i.exec(s);
+  if (quality) return `ep${Number(quality[1])}`;
   // 结尾裸集号（`06.mp4` / `斗罗大陆 120`）
-  const bare = /(?:^|[^0-9])0*(\d{1,3})(?=\.[a-z0-9]{1,5}$|\s*$)/i.exec(s);
+  const bare = /(?:^|[^a-z0-9])0*(\d{1,3})(?=\.[a-z0-9]{1,5}$|\s*$)/i.exec(s);
   if (bare) return `ep${Number(bare[1])}`;
   return s.replace(/\.[a-z0-9]{1,6}$/i, '').trim();
 }

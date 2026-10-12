@@ -126,8 +126,8 @@
   box-shadow: 0 1px 4px rgba(20, 28, 18, .14), 0 0 0 1px rgba(20, 28, 18, .04);
 }
 :root[data-theme='douban'] .db-main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-/* 内容区底部留白：右下角浮动圆钮不压住最后一排卡片 */
-:root[data-theme='douban'] .db-main .content { padding: 18px 22px 108px; }
+/* 无悬浮导航遮挡，内容区使用正常底部留白。 */
+:root[data-theme='douban'] .db-main .content { padding: 18px 22px 24px; }
 
 /* ★ 右下角浮动圆钮（重做）：squircle（圆角方）+ 白色玻璃（未选中）/ 豆绿渐变（选中） */
 :root[data-theme='douban'] .db-fabs { position: fixed; right: 22px; bottom: 22px; z-index: 40; display: flex; flex-direction: column; align-items: center; gap: 12px; }
@@ -548,8 +548,6 @@
 :root[data-theme='douban'] .cfg-tab:hover { background: rgba(26, 32, 25, .06) !important; color: var(--text) !important; box-shadow: none !important; }
 :root[data-theme='douban'] .cfg-tab.active { background: var(--accent-container) !important; color: var(--accent-strong) !important; font-weight: 750 !important; }
 :root[data-theme='douban'] .cfg-tab.active:hover { background: #D2EDCE !important; color: var(--accent-strong) !important; box-shadow: none !important; }
-/* 详情页剧集翻页行（「上一页/下一页」靠右）避开右下角浮动圆钮，防「下一页」被盖住点不到 */
-:root[data-theme='douban'] .db-detail .ep-pager { padding-right: 64px; }
 
 /* The wall is dense by design, but its interactive items still need a crisp keyboard state. */
 :root[data-theme='douban'] .db-wall-chip:focus-visible,
@@ -560,7 +558,7 @@
 }
 
 @media (max-width: 560px) {
-  :root[data-theme='douban'] .db-main .content { padding: 12px 10px 86px; }
+  :root[data-theme='douban'] .db-main .content { padding: 12px 10px 20px; }
   :root[data-theme='douban'] .db-wall-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 10px; }
   :root[data-theme='douban'] .db-fabs { right: 10px; bottom: 10px; }
 }

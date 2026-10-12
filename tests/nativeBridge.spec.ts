@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { JarSpiderBridge, extractBridgeNotes, isGuardInnerSpiderNull } from '../src/engine/spider/JarSpiderBridge';
 import { NullLogger } from '../src/engine/util/logger';
 import { buildZip } from '../src/engine/util/syncZip';
+import { nativeFixture } from './fixtures/nativeClass';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
@@ -140,6 +141,22 @@ describe('JarSpiderBridge.call — ARM 原生桥接入', () => {
     const argv = spawnMock.mock.calls[0][1] as string[];
     expect(argv.some((a) => a.startsWith('-Dtvbox.native.'))).toBe(false);
     expect(classpathOf(argv)).not.toContain('native-bridge.jar');
+  });
+
+  it('嗷呜同款：外层无 .so，但含 native 方法 → 启用动态库桥接', async () => {
+    const rt = join(tmpdir(), `tvm-native-dynamic-${Date.now()}`);
+    dirs.push(rt); seedNativeRuntime(rt);
+    const { bridge, dir } = makeBridge({ nativeRuntimeDir: rt }); dirs.push(dir);
+    const jar = join(dir, 'dynamic.jar');
+    writeFileSync(jar, buildZip([{ name: 'fixture/Probe.class', bytes: nativeFixture() }]));
+    const p = bridge.call([jar], 'fixture.Probe', 'method', []);
+    for (let i = 0; i < 100 && !spawnMock.mock.results.length; i++) await new Promise(r => setTimeout(r, 5));
+    expect(spawnMock.mock.results.length).toBe(1);
+    (spawnMock.mock.results[0].value as ReturnType<typeof fakeChild>).emit('close', 0);
+    await p;
+    const argv = spawnMock.mock.calls[0][1] as string[];
+    expect(argv).toContain(`-Dtvbox.native.work=${join(rt, 'work')}`);
+    expect(classpathOf(argv)).toContain('native-bridge.jar');
   });
 });
 

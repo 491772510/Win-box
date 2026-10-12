@@ -54,6 +54,7 @@ public final class NativeBridge {
     private static int archBits = 64;
     private static String soName = "";
     private static long soSize = 0;
+    private static byte[] outerSoDigest;
     private static String report = "";
 
     // ---------------- 载荷层（运行时 dex 里的 native）状态 ----------------
@@ -198,6 +199,10 @@ public final class NativeBridge {
      * @param resolver 蜘蛛类加载器（让原生回调能反射到真实的 Init / android stub）
      */
     public static synchronized void init(File jar, File workDir, ClassLoader resolver) throws Exception {
+        initWithSo(jar, workDir, resolver, null);
+    }
+
+    private static synchronized void initWithSo(File jar, File workDir, ClassLoader resolver, File dynamicSo) throws Exception {
         long t0 = System.currentTimeMillis();
         File soDir = new File(workDir, "so");
         File rootfs = new File(workDir, "rootfs");
@@ -206,18 +211,21 @@ public final class NativeBridge {
         // noinspection ResultOfMethodCallIgnored
         rootfs.mkdirs();
 
-        File so = extractSo(jar, soDir);
+        File so = dynamicSo == null ? extractSo(jar, soDir) : dynamicSo;
         soName = so.getName();
         soSize = so.length();
         archBits = detectArchBits(so);
 
-        AndroidEmulatorBuilder builder = archBits == 32
-                ? AndroidEmulatorBuilder.for32Bit()
-                : AndroidEmulatorBuilder.for64Bit();
-        builder.setProcessName("com.winbox.spider");
-        builder.setRootDir(rootfs);
-        builder.addBackendFactory(backendFactory());
-        emulator = builder.build();
+        if (archBits == 32) {
+            emulator = new BridgeARM32Emulator("com.winbox.spider", rootfs,
+                    java.util.Collections.singletonList(backendFactory()));
+        } else {
+            AndroidEmulatorBuilder builder = AndroidEmulatorBuilder.for64Bit();
+            builder.setProcessName("com.winbox.spider");
+            builder.setRootDir(rootfs);
+            builder.addBackendFactory(backendFactory());
+            emulator = builder.build();
+        }
         emulator.getMemory().setLibraryResolver(new AndroidResolver(23));
         emulator.getSyscallHandler().setEnableThreadDispatcher(true);
         PosixFile.setRootfs(emulator.getFileSystem().getRootDir());
@@ -259,6 +267,8 @@ public final class NativeBridge {
         DalvikModule dm = vm.loadLibrary(so, true);
         module = dm.getModule();
         dm.callJNI_OnLoad(emulator);
+        outerSoDigest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(java.nio.file.Files.readAllBytes(so.toPath()));
 
         Map<String, List<String[]>> nativeMethods = scanNativeMethods(jar);
         List<String> notes = new ArrayList<>();
@@ -290,10 +300,28 @@ public final class NativeBridge {
         for (Map.Entry<String, List<String[]>> e : nativeMethods.entrySet()) {
             DvmClass dvmClass = vm.resolveClass(e.getKey());
             Map<String, ?> natives = nativesMap(dvmClass);
-            if (natives.isEmpty()) continue;
+            Map<String, Boolean> exported = new LinkedHashMap<>();
+            for (String[] m : e.getValue()) {
+                if (module.findSymbolByName("Java_" + mangle(e.getKey()) + "_" + mangle(m[0]), false) != null) {
+                    exported.put(m[0] + m[1], false);
+                }
+            }
+            if (natives.isEmpty() && exported.isEmpty()) continue;
             CLASSES.put(e.getKey(), dvmClass);
             Map<String, Boolean> plan = PLAN.computeIfAbsent(e.getKey(), k -> new LinkedHashMap<>());
+            plan.putAll(exported);
             for (String key : natives.keySet()) plan.put(key, false);
+            // Some spiders declare a second group of native methods on the same
+            // Java class for a library downloaded later (FishNative is the
+            // current example: FishGuard registers the guard methods, while the
+            // downloaded Go library registers fishGoAbiVersion/startV2/stop).
+            // Those declarations must not remain native on the host JVM.  Mark
+            // declarations absent from the outer library for the payload VM;
+            // invokePayload will route them after the sidecar .so is loaded.
+            for (String[] m : e.getValue()) {
+                String key = m[0] + m[1];
+                if (!plan.containsKey(key)) plan.put(NativePatcher.PAYLOAD_METHOD + key, false);
+            }
             total += natives.size();
         }
 
@@ -536,7 +564,9 @@ public final class NativeBridge {
                 break;
             case 'L':
             case '[':
-                r = unwrap(c.callStaticJniMethodObject(emu, sig, a), ret == '[');
+                ClassLoader loader = target instanceof com.github.unidbg.linux.android.dvm.BaseVM
+                        ? EnvJni.hostLoaderOf((com.github.unidbg.linux.android.dvm.BaseVM) target) : lazyResolver;
+                r = unwrap(c.callStaticJniMethodObject(emu, sig, a), desc.substring(desc.indexOf(')') + 1), loader);
                 break;
             default:
                 throw new UnsupportedOperationException("原生桥暂不支持返回类型: " + desc);
@@ -611,13 +641,24 @@ public final class NativeBridge {
         try {
             Class<?> c = loadExtra(dottedClassName);
             if (c == null) c = Class.forName(dottedClassName, false, NativeBridge.class.getClassLoader());
+            clinitRun(c);
+        } catch (Throwable t) {
+            Throwable cause = t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null
+                    ? t.getCause() : t;
+            clinitFailed(dottedClassName, cause);
+        }
+    }
+
+    /** Class literal keeps the defining loader: outer dynamic-library classes are not extra dex classes. */
+    public static void clinitRun(Class<?> c) {
+        try {
             java.lang.reflect.Method m = c.getDeclaredMethod("tvboxClinit");
             m.setAccessible(true);
             m.invoke(null);
         } catch (Throwable t) {
             Throwable cause = t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null
                     ? t.getCause() : t;
-            clinitFailed(dottedClassName, cause);
+            clinitFailed(c.getName(), cause);
         }
     }
 
@@ -646,6 +687,35 @@ public final class NativeBridge {
             payloadLoad(path);
         } catch (Throwable t) {
             System.err.println("[native-bridge] 载荷库装载失败（其 native 调用将不可用）: " + path + " → " + t);
+        }
+    }
+
+    /** System.load in an embedded-library class may load either the already
+     * initialized guard or a downloaded sidecar. Compare content, not basename:
+     * guard copies can have temporary names, and names alone can collide. */
+    public static void bridgeLoadEmbedded(String path) {
+        try {
+            File source = new File(path);
+            if (!source.isFile()) throw new java.io.FileNotFoundException(path);
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(java.nio.file.Files.readAllBytes(source.toPath()));
+            synchronized (LOCK) {
+                ensureInit();
+                if (java.util.Arrays.equals(digest, outerSoDigest)) return;
+            }
+            // Do not hold the guard lock while loading into the separate VM.
+            payloadLoad(path);
+        } catch (Exception e) {
+            throw new IllegalStateException("运行时原生库装载失败: " + path, e);
+        }
+    }
+
+    /** The outer dynamic guard needs its own VM: getLoader can load a second ARM library through JNI callbacks. */
+    public static void bridgeLoadDynamic(String path) {
+        try {
+            initWithSo(lazyJar, lazyWork, lazyResolver, new File(path));
+        } catch (Exception t) {
+            throw new IllegalStateException("动态原生库装载失败: " + path, t);
         }
     }
 
@@ -730,11 +800,9 @@ public final class NativeBridge {
         // noinspection ResultOfMethodCallIgnored
         rootfs.mkdirs();
 
-        AndroidEmulatorBuilder builder = AndroidEmulatorBuilder.for32Bit();
-        builder.setProcessName("com.winbox.spider.payload");
-        builder.setRootDir(rootfs);
-        builder.addBackendFactory(backendFactory());
-        payloadEmulator = builder.build();
+        payloadEmulator = new BridgeARM32Emulator("com.winbox.spider.payload", rootfs,
+                java.util.Collections.singletonList(backendFactory()));
+        if (emulator == null) PosixFile.setRootfs(payloadEmulator.getFileSystem().getRootDir());
         payloadEmulator.getMemory().setLibraryResolver(new AndroidResolver(23));
         payloadEmulator.getSyscallHandler().setEnableThreadDispatcher(true);
         payloadVm = payloadEmulator.createDalvikVM();
@@ -813,10 +881,10 @@ public final class NativeBridge {
     }
 
     /** DVM 返回值 → Java 值（String / byte[] / String[] / 原始包装） */
-    private static Object unwrap(DvmObject<?> o, boolean isArray) {
+    private static Object unwrap(DvmObject<?> o, String descriptor, ClassLoader loader) {
         if (o == null) return null;
         Object v = o.getValue();
-        if (!isArray) return v;
+        if (!descriptor.startsWith("[")) return v;
         if (v instanceof byte[] || v instanceof short[] || v instanceof int[] || v instanceof long[]
                 || v instanceof float[] || v instanceof double[] || v instanceof char[] || v instanceof boolean[]) {
             return v;
@@ -824,8 +892,18 @@ public final class NativeBridge {
         if (o instanceof ArrayObject || v instanceof DvmObject<?>[]) {
             DvmObject<?>[] arr = o instanceof ArrayObject ? ((ArrayObject) o).getValue() : (DvmObject<?>[]) v;
             if (arr == null) return null;
-            Object[] out = new Object[arr.length];
-            for (int i = 0; i < arr.length; i++) out[i] = arr[i] == null ? null : arr[i].getValue();
+            // CHECKCAST in the rewritten method requires the declared array type, not Object[].
+            // Preserve dimensions, null entries and the spider's defining loader as well.
+            Class<?> arrayType;
+            try {
+                arrayType = Class.forName(descriptor.replace('/', '.'), false,
+                        loader == null ? NativeBridge.class.getClassLoader() : loader);
+            } catch (ClassNotFoundException e) {
+                throw new IllegalStateException("Native array return type unavailable: " + descriptor, e);
+            }
+            Object out = java.lang.reflect.Array.newInstance(arrayType.getComponentType(), arr.length);
+            String component = descriptor.substring(1);
+            for (int i = 0; i < arr.length; i++) java.lang.reflect.Array.set(out, i, unwrap(arr[i], component, loader));
             return out;
         }
         return v;

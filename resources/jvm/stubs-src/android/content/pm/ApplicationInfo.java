@@ -15,4 +15,5 @@ public class ApplicationInfo {
     public int minSdkVersion = 21;
     public String nativeLibraryDir = "";
     public String processName = "com.github.tvbox.osc";
+    public CharSequence loadLabel(PackageManager pm) { return name == null ? packageName : name; }
 }

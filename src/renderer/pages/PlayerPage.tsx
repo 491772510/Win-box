@@ -12,6 +12,8 @@ import { playerWindowTitle } from '../lib/videoResolution';
 import { makeStaleGuard, acceptInitSeq } from '../lib/staleGuard';
 import { restoreHistorySource } from '../lib/historySource';
 import type { PlayResult } from '../../shared/types';
+import DriveBindModal from '../components/DriveBindModal';
+import { playbackResultError } from '../../shared/playbackResult';
 
 /**
  * ★ 2026-09-26：本页只在**独立播放器窗口**运行（主窗口无 /player 路由）。
@@ -100,15 +102,10 @@ export default function PlayerPage() {
       const r: PlayResult = preparedUrl ? { url: preparedUrl, parse: 0, flag: d.flag, playUrl: '' } : await client.play({ key: d.key, flag: d.flag, id: target.url });
       if (!resolveGen.current.isCurrent(gen)) return; // 过期结果：不 setActiveUrl、不记历史
       setDriveBind(r.needDriveCookieBind || null);
-      if (r.needDriveCookieBind) { setActiveUrl(target.url); return; }
-      if (r.parse === 1) {
-        // 主进程已尽力做「解析接口 → 隐藏窗口嗅探」，仍拿不到直连地址：
-        // 只显示原因，不把网盘/网页原始地址当成媒体地址硬播。
-        setParseMsg(r.message || '该播放地址需要网页解析，未能自动解析出直连地址');
-        return;
-      }
-      if (!r.url) {
-        setParseMsg(r.message || '未能取得播放地址，请重试或切换线路');
+      if (r.needDriveCookieBind) return;
+      const playError = playbackResultError(r);
+      if (playError) {
+        setParseMsg(playError);
         return;
       }
       setParseMsg('');
@@ -367,6 +364,17 @@ export default function PlayerPage() {
           `min-height: 0`，flex 的默认 `min-height: auto` 会被视频固有比例撑高，
           竖屏/超宽视频会把播放器整体顶出视口，底部控制条随之不可见（用户报的「下方 UI 消失」）。 */}
       <div className="pwin-body">
+        {driveBind && (
+          <DriveBindModal
+            siteName={curName || '当前播放源'}
+            initialProvider={driveBind}
+            onClose={() => setDriveBind(null)}
+            onSaved={() => {
+              setDriveBind(null);
+              if (init) void resolve(init, epIndex);
+            }}
+          />
+        )}
         {parseMsg && (
           <div className="err" style={{ margin: '8px 12px 0', fontSize: 12 }} title={parseMsg}>
             {parseMsg}

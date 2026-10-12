@@ -160,6 +160,17 @@ describe('imagePreludeLen — PNG 伪装分片识别', () => {
     expect(imagePreludeLen(Buffer.concat([prefix, tsPayload(5)]))).toBe(prefix.length);
   });
 
+  it('图片伪装 HLS 分片暴露 TS 路径，原始签名 URL 不改写', () => {
+    const segment = 'https://cdn.example.com/a.webp?signature=a%2Bb%2Fc%3D';
+    const out = text(rewriteM3u8(Buffer.from('#EXTM3U\n#EXTINF:5,\n' + segment), BASE, UA, REF, CK));
+    const relay = new URL(out.split('\n')[2]);
+    expect(relay.pathname).toBe('/play/segment.ts');
+    expect(relay.search).not.toContain('.webp');
+    expect(relay.searchParams.get('url')).toBe(segment);
+    expect(relay.searchParams.get('ua')).toBe(UA);
+    expect(text(rewriteM3u8(Buffer.from(out), BASE, UA, REF, CK))).toBe(out);
+  });
+
   it('纯 PNG 或伪造块结构不剥离', () => {
     const prefix = png();
     expect(imagePreludeLen(prefix)).toBe(0);
@@ -182,5 +193,48 @@ describe('imagePreludeLen — PNG 伪装分片识别', () => {
       expect(imagePreludeLen(body.subarray(0, end))).toBe(0);
     }
     expect(imagePreludeLen(body)).toBe(prefix.length);
+  });
+});
+
+describe('imagePreludeLen — 摸鱼儿 WebP TS_D 分片', () => {
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const header = Buffer.alloc(8); header.write(type); header.writeUInt32LE(data.length, 4);
+    return Buffer.concat([header, data, ...(data.length & 1 ? [Buffer.alloc(1)] : [])]);
+  };
+  const riff = (...chunks: Buffer[]): Buffer => {
+    const data = Buffer.concat([Buffer.from('WEBP'), ...chunks]);
+    const header = Buffer.alloc(8); header.write('RIFF'); header.writeUInt32LE(data.length, 4);
+    return Buffer.concat([header, data]);
+  };
+  const ts = Buffer.alloc(188 * 5, 0xaa);
+  for (let i = 0; i < 5; i++) ts[i * 188] = 0x47;
+  const image = chunk('VP8 ', Buffer.alloc(908)); // 真实样本中 TS_D 在 928，载荷在 936
+
+  it('RIFF 包含尾部 TS_D，而不是 JPEG/PNG 式尾随 → 正确剥离 936 字节', () => {
+    const body = riff(image, chunk('TS_D', ts));
+    expect(imagePreludeLen(body)).toBe(936);
+    expect(imagePreludeLen(body.subarray(0, 936 + 565))).toBe(936);
+    expect(imagePreludeLen(body.subarray(0, 936 + 564))).toBe(0);
+  });
+
+  it('奇数长度块带 padding、VP8L 和扩展头按 chunk 边界走', () => {
+    const chunks = [chunk('VP8X', Buffer.alloc(10)), chunk('VP8L', Buffer.alloc(3))];
+    expect(imagePreludeLen(riff(...chunks, chunk('TS_D', ts)))).toBe(12 + 18 + 12 + 8);
+  });
+
+  it('纯图片、图片内部伪造 TS_D、无图片块均不剥离', () => {
+    expect(imagePreludeLen(riff(image))).toBe(0);
+    expect(imagePreludeLen(riff(chunk('VP8 ', Buffer.concat([chunk('TS_D', ts)]))))).toBe(0);
+    expect(imagePreludeLen(riff(chunk('TS_D', ts)))).toBe(0);
+  });
+
+  it('坏 RIFF/chunk 长度、不对齐 TS、非尾部 TS_D、其他 RIFF 类型不剥离', () => {
+    const body = riff(image, chunk('TS_D', ts));
+    const shortRiff = Buffer.from(body); shortRiff.writeUInt32LE(body.length - 9, 4);
+    const badImage = Buffer.from(body); badImage.writeUInt32LE(0xffffffff, 16);
+    const badTs = Buffer.from(body); badTs[936 + 188] = 0;
+    const wave = Buffer.from(body); wave.write('WAVE', 8);
+    for (const invalid of [shortRiff, badImage, badTs, wave, riff(image, chunk('TS_D', ts), chunk('EXIF', Buffer.alloc(4))),
+      riff(image, chunk('TS_D', ts.subarray(0, ts.length - 1)))]) expect(imagePreludeLen(invalid)).toBe(0);
   });
 });

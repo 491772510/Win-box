@@ -52,6 +52,7 @@ const hoisted = vi.hoisted(() => ({
   },
   quark: {
     calls: [] as Array<{ sId: string; passcode: string }>,
+    targets: [] as Array<{ innerFid?: string; innerName?: string }>,
     result: {
       ok: true,
       url: 'https://quark-cdn.test/f/x.mp4?token=3',
@@ -85,8 +86,9 @@ vi.mock('../src/main/net/ucTransfer', async (orig) => ({
 
 vi.mock('../src/main/net/quarkTransfer', async (orig) => ({
   ...(await orig<typeof import('../src/main/net/quarkTransfer')>()),
-  quarkTransfer: async (pwdId: string, _cookie: string, opts?: { passcode?: string }) => {
+  quarkTransfer: async (pwdId: string, _cookie: string, opts?: { passcode?: string; innerFid?: string; innerName?: string }) => {
     hoisted.quark.calls.push({ sId: pwdId, passcode: opts?.passcode || '' });
+    hoisted.quark.targets.push({ innerFid: opts?.innerFid, innerName: opts?.innerName });
     return { ...hoisted.quark.result };
   },
 }));
@@ -144,9 +146,37 @@ describe('parsePanProxyQuery（端口 -1，不能用 new URL）', () => {
 });
 
 describe('SpiderHost：do=pan → 原生解链', () => {
+  it('潇洒玩偶 UC 复合选集 3→5→3 保留原始 fid/name，不进入 jar 或夸克', async () => {
+    const { host, key } = makeHost('', { uc: 'uc-cookie', quark: 'quark-cookie' });
+    const vm = (host as any).vm;
+    vm.play = vi.fn();
+    const quarkStart = hoisted.quark.calls.length;
+    for (const ep of ['3', '5', '3']) {
+      const name = `0${ep}~4K.mp4[1.01GB]`, fid = ep.repeat(32);
+      const id = `${name}__${fid}+11adf8105c314+${'a'.repeat(32)}`;
+      const r = await host.play(key, 'UC无限#5', id);
+      expect(r.parse).toBe(0);
+      expect(hoisted.uc.calls.at(-1)).toMatchObject({ pwdId: '11adf8105c314', innerFid: fid, innerName: name });
+    }
+    expect(hoisted.quark.calls.length).toBe(quarkStart);
+    expect(vm.play).not.toHaveBeenCalled();
+  });
+
+  it('潇洒玩偶夸克复合选集直接走原生目标，不丢分享 ID', async () => {
+    const { host, key } = makeHost('', { quark: 'quark-cookie' });
+    const vm = (host as any).vm;
+    vm.play = vi.fn();
+    const id = `03-4K.mp4__${'3'.repeat(32)}+11adf8105c314+${'a'.repeat(32)}`;
+    const r = await host.play(key, '夸克无限#4', id);
+    expect(r.parse).toBe(0);
+    expect(hoisted.quark.calls.at(-1)).toEqual({ sId: '11adf8105c314', passcode: '' });
+    expect(hoisted.quark.targets.at(-1)).toMatchObject({ innerFid: '3'.repeat(32), innerName: '03-4K.mp4' });
+    expect(vm.play).not.toHaveBeenCalled();
+  });
   it('明确 UC 描述未绑定时只要求绑定 UC，不误用已绑定夸克账号', async () => {
     const { host, key } = makeHost('');
-    const store = (host as unknown as { drives: { set: (k: string, v: string) => void } }).drives;
+    const store = (host as unknown as { drives: { set: (k: string, v: string) => void; remove: (k: string) => void } }).drives;
+    store.remove('uc');
     store.set('quark', 'quark-cookie');
     const quarkStart = hoisted.quark.calls.length;
     const r = await host.play(key, '优汐无限1', JSON.stringify({ sId: 'ucshare123', fid: 'file-2' }));
@@ -316,6 +346,26 @@ describe('SpiderHost：do=pan → 原生解链', () => {
     expect(r.parse).toBe(0);
     expect(r.url).toContain('http://127.0.0.1:9978/play?');
     expect(decodeURIComponent(r.url)).toContain('https://quark-cdn.test/f/x.mp4?token=3');
+  });
+
+  it('夸克返回同一分享链接时保留原始选集 fid/name，3→5→3 不丢目标', async () => {
+    const { host, key } = makeHost('http://127.0.0.1:-1/proxy?do=pan&site=quark&fileId=' + encodeURIComponent('https://pan.quark.cn/s/abc123'), { quark: 'cookie' });
+    const start = hoisted.quark.targets.length;
+    for (const ep of [3, 5, 3]) {
+      const r = await host.play(key, '夸克', JSON.stringify({ fid: `file-${ep}`, file_name: `第${ep}集.mp4` }));
+      expect(r.parse).toBe(0);
+    }
+    expect(hoisted.quark.targets.slice(start)).toEqual([3, 5, 3].map(ep => ({ innerFid: `file-${ep}`, innerName: `第${ep}集.mp4` })));
+  });
+
+  it('UC 裸分享/文件参数即使解链失败也不能转发给夸克', async () => {
+    const start = hoisted.quark.calls.length;
+    const { host, key } = makeHost('http://127.0.0.1:-1/proxy?do=pan&site=uc&shareId=e8ac5a87aa2e&fileId=2e3ad195e9834c9a8f71f4abef80d30d', { quark: 'cookie' });
+    vi.spyOn(host, 'driveList').mockReturnValue({ quark: 'cookie' });
+    const r = await host.play(key, 'UC#3', 'ep3');
+    expect(r.parse).toBe(1);
+    expect(hoisted.quark.calls.length).toBe(start);
+    expect(r.needDriveCookieBind).toBe('uc');
   });
 
   it('★ 2026-10-09：site=quark 识别但未绑定 → needDriveCookieBind=quark（绑定引导）', async () => {
