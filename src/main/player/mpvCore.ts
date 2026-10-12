@@ -10,6 +10,15 @@
 import type { MpvCommand, MpvKernelState } from '../../shared/player';
 import { mpvFontSize, mpvSubPos } from '../../shared/player';
 import { playerCandidates } from '../torrent/externalPlayer';
+import {
+  isWin,
+  mpvEmbedSupported,
+  platformName,
+  type PlatformName,
+} from '../../shared/platform';
+
+/** ★ 2026-10-12（macOS 适配 §3.7-5）：就近 re-export，mpvCore 的单测可直接断言嵌入开关 */
+export { mpvEmbedSupported };
 
 /** 初始状态（每次会话重置） */
 export function initialKernelState(live = false): MpvKernelState {
@@ -193,9 +202,9 @@ export function mpvFitProps(fit: string): Array<[string, string]> {
 }
 
 export interface BuildMpvArgsOptions {
-  /** IPC 管道名（\\.\pipe\…） */
+  /** IPC 端点（win32 命名管道 `\\.\pipe\…` / darwin unix socket 路径） */
   pipe: string;
-  /** 父窗口 HWND（十进制字符串） */
+  /** 父窗口原生句柄（win32 HWND / darwin NSView 指针，十进制字符串） */
   wid: string;
   /** 起播位置（秒，>0 才传） */
   start?: number;
@@ -205,6 +214,57 @@ export interface BuildMpvArgsOptions {
   rate?: number;
   /** 画面比例（PlayerFit） */
   fit?: string;
+  /** 缺省 = 当前真实平台（win32 产出与改动前**逐项逐序**相同） */
+  platform?: PlatformName;
+  /** 嵌入开关的环境变量快照（缺省 = `process.env`；注入便于单测） */
+  env?: Record<string, string | undefined>;
+}
+
+/** 运行期环境变量快照（模块内零依赖，取不到时退化为空对象） */
+function envSnapshot(env?: Record<string, string | undefined>): Record<string, string | undefined> {
+  if (env) return env;
+  return (typeof process !== 'undefined' ? process.env : {}) as Record<string, string | undefined>;
+}
+
+/**
+ * 视频输出 / 硬解参数（★ 平台相关，2026-10-12 macOS 适配抽出）。
+ *
+ * - win32：与改动前**逐项、逐顺序完全相同**（d3d11 三参 + `--hwdec=auto-safe` 在 `--vo` 之前，勿调换）；
+ * - darwin：Metal / OpenGL 交给 mpv 自选（`--gpu-api=auto` / `--gpu-context=auto`），
+ *   保留 `--hwdec=auto-safe`（macOS 上会自动选中 videotoolbox；失败自动回软解）。
+ *   ★★ darwin 分支**绝不能出现任何 d3d11 参数**（mpv 在 macOS 上不认，会直接启动失败）。
+ */
+export function mpvVideoArgs(p: PlatformName = platformName()): string[] {
+  if (isWin(p)) {
+    return [
+      '--hwdec=auto-safe',
+      // gpu-next/libplacebo fails FBO allocation on some integrated GPUs after switching sources.
+      '--vo=gpu',
+      '--gpu-api=d3d11',
+      '--gpu-context=d3d11',
+      '--d3d11-feature-level=11_0',
+    ];
+  }
+  return ['--vo=gpu', '--gpu-api=auto', '--gpu-context=auto', '--hwdec=auto-safe'];
+}
+
+/**
+ * 嵌入参数（★ 风险 R1 现场）：`mpvEmbedSupported()` 为假时**不传 `--wid`**
+ * —— mpv 退化为独立窗口（仍能播），而不是启动失败或把整条播放链路挂死。
+ */
+export function mpvWidArgs(
+  wid: string,
+  p: PlatformName = platformName(),
+  env?: Record<string, string | undefined>,
+): string[] {
+  if (!mpvEmbedSupported(envSnapshot(env), p)) return [];
+  const id = String(wid ?? '').trim();
+  return id ? [`--wid=${id}`] : [];
+}
+
+/** JSON IPC 端点参数（与平台无关的单一参数，抽出只为与上面两个对称 + 可单测） */
+export function mpvIpcArgs(ipc: string, _p?: PlatformName): string[] {
+  return [`--input-ipc-server=${ipc}`];
 }
 
 /**
@@ -214,23 +274,19 @@ export interface BuildMpvArgsOptions {
  *   --input-default-bindings=no（键盘鼠标不抢，全由 HTML 层接管）。
  */
 export function buildMpvArgs(o: BuildMpvArgsOptions): string[] {
+  const p = o.platform ?? platformName();
   const args = [
     '--no-config',
     '--idle=yes',
     '--force-window=yes',
     '--keep-open=yes',
-    '--hwdec=auto-safe',
-    // gpu-next/libplacebo fails FBO allocation on some integrated GPUs after switching sources.
-    '--vo=gpu',
-    '--gpu-api=d3d11',
-    '--gpu-context=d3d11',
-    '--d3d11-feature-level=11_0',
+    ...mpvVideoArgs(p),
     '--osc=no',
     '--input-default-bindings=no',
     '--input-vo-keyboard=no',
     '--msg-level=all=error',
-    `--wid=${o.wid}`,
-    `--input-ipc-server=${o.pipe}`,
+    ...mpvWidArgs(o.wid, p, o.env),
+    ...mpvIpcArgs(o.pipe, p),
   ];
   const start = Number(o.start) || 0;
   if (start > 0) args.push(`--start=${Math.floor(start)}`);
@@ -275,7 +331,7 @@ export function mpvCommandLines(cmd: MpvCommand): string[] {
 export interface MpvResolveOptions {
   /** 用户配置覆盖路径（playerSettings.mpvPath） */
   override?: string;
-  /** 随包内置路径（resources/mpv/mpv.exe） */
+  /** 随包内置路径（调用方按平台拼：win32 `resources/mpv/mpv.exe` / darwin `resources/mpv/mpv`） */
   bundled?: string;
   /** 环境变量快照（本机探测用） */
   env?: Record<string, string | undefined>;

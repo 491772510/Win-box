@@ -2,14 +2,14 @@
 //   · aria2c 引擎命令行（纯构造：参数写错会静默劣化体验 —— 门控/续传/孤儿进程全靠它）
 //   · 外部播放器探测（MKV/HEVC 接力）
 //   · PlayerSettings 的 btExternalPlayer 归一（老配置容错）
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 
 // Aria2Sidecar 会 import ../util/paths（依赖 electron 的 app.getPath；本文件只调用纯函数）
 vi.mock('electron', () => ({
   app: { getPath: () => process.env.TEMP || '.', isPackaged: false },
 }));
 
-import { aria2Args } from '../src/main/torrent/Aria2Sidecar';
+import { aria2Args, Aria2Sidecar } from '../src/main/torrent/Aria2Sidecar';
 import { playerCandidates, pickPlayers, type ExternalPlayer } from '../src/main/torrent/externalPlayer';
 import { normalizePlayerSettings, DEFAULT_PLAYER_SETTINGS } from '../src/shared/player';
 
@@ -55,6 +55,55 @@ describe('aria2Args — BT 引擎命令行（行为关键项锁死）', () => {
   });
 });
 
+// ★ 2026-10-12（macOS 适配 T03 §3.10）：引擎命令行 / 可执行名平台化。
+/** 平台注入走 env（`platformName()` 优先读 `WINBOX_TEST_PLATFORM`）；见 T01 说明 */
+const PLATFORM_ENV = 'WINBOX_TEST_PLATFORM';
+afterEach(() => delete process.env[PLATFORM_ENV]);
+
+describe('aria2Args / exePath — 平台化（darwin 无 --stop-with-process、无 .exe 后缀）', () => {
+  it('★ `--stop-with-process` 是 Windows 专有：darwin 传了 pid 也不带（aria2 会直接报错退出）', () => {
+    const darwin = aria2Args(6800, 's', '/tmp/bt', process.pid, 'darwin');
+    expect(darwin.some((a) => a.startsWith('--stop-with-process'))).toBe(false);
+    const win = aria2Args(6800, 's', 'C:\\bt', 4242, 'win32');
+    expect(win).toContain('--stop-with-process=4242');
+    // 其余关键项两平台一致（平台化只动这一条）
+    for (const f of ['--no-conf=true', '--rpc-listen-all=false', '--bt-prioritize-piece=head=8M,tail=8M', '--file-allocation=none']) {
+      expect(darwin).toContain(f);
+      expect(win).toContain(f);
+    }
+  });
+
+  it('★ exePath()：win32 带 `.exe`；darwin 无后缀（写死 .exe 会让 macOS 恒判「引擎缺失」）', () => {
+    process.env[PLATFORM_ENV] = 'win32';
+    expect(Aria2Sidecar.exePath().endsWith(`aria2c.exe`)).toBe(true);
+    process.env[PLATFORM_ENV] = 'darwin';
+    const mac = Aria2Sidecar.exePath();
+    expect(mac.endsWith('aria2c')).toBe(true);
+    expect(mac.includes('.exe')).toBe(false);
+  });
+
+  it('★ resolveExe()：内置缺失时走本机探测；全缺 → 人话 hint（darwin 含 brew install aria2）', () => {
+    process.env[PLATFORM_ENV] = 'darwin';
+    const r = Aria2Sidecar.resolveExe();
+    expect(['override', 'bundled', 'system', 'none']).toContain(r.source);
+    expect(typeof r.path).toBe('string');
+    // 本机（Windows 主机）不可能有 /opt/homebrew/bin/aria2c → 必然是 none + darwin 修复指引
+    if (!r.path) {
+      expect(r.source).toBe('none');
+      expect(r.hint).toContain('brew install aria2');
+      // 与 exePath() 自洽：内置候选就是探测链的首选 bundled 路径
+      expect(Aria2Sidecar.resolveExe().path).toBe('');
+    }
+  });
+
+  it('win32 resolveExe()：内置路径与 exePath() 一致（同一候选，不自相矛盾）', () => {
+    process.env[PLATFORM_ENV] = 'win32';
+    expect(Aria2Sidecar.exePath().endsWith('aria2c.exe')).toBe(true);
+    const r = Aria2Sidecar.resolveExe();
+    expect(r.path === '' || r.path.endsWith('aria2c.exe')).toBe(true);
+  });
+});
+
 const ENV: Record<string, string | undefined> = {
   ProgramFiles: 'C:\\Program Files',
   'ProgramFiles(x86)': 'C:\\Program Files (x86)',
@@ -62,7 +111,9 @@ const ENV: Record<string, string | undefined> = {
 };
 
 describe('playerCandidates — 候选安装位置（顺序＝优先级）', () => {
-  const cands = playerCandidates(ENV);
+  // ★ 显式 'win32'：本组用例测的是 Windows 候选表；platform 缺省会读进程级全局
+  //   `WINBOX_TEST_PLATFORM`（并行 spec 可能写 darwin）→ 不钉死会随机失败
+  const cands = playerCandidates(ENV, 'win32');
 
   it('覆盖率：PotPlayer / VLC / mpv / MPC-HC 都在候选表里', () => {
     const ids = new Set(cands.map((c) => c.id));
@@ -84,7 +135,7 @@ describe('playerCandidates — 候选安装位置（顺序＝优先级）', () =
   });
 
   it('环境变量缺失时用默认 Program Files，LOCALAPPDATA 缺失则不产生该候选（不留空串路径）', () => {
-    const c = playerCandidates({});
+    const c = playerCandidates({}, 'win32');
     expect(c.every((x) => x.path.startsWith('C:\\Program Files'))).toBe(true);
     expect(c.some((x) => x.path.includes('AppData'))).toBe(false);
     expect(c.every((x) => x.path.endsWith('.exe'))).toBe(true);

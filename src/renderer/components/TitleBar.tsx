@@ -8,6 +8,7 @@
 //   （原在播放器下方控制条，用户反馈下方功能区太拥挤；状态由 PlayerPage 统一持有）。
 import { useEffect, useState } from 'react';
 import { client } from '../api/client';
+import { isMacRenderer } from '../lib/platform';
 
 interface TitleBarProps {
   title?: string;
@@ -27,7 +28,7 @@ interface TitleBarProps {
   variant?: 'win' | 'mac';
 }
 
-export default function TitleBar({ title = 'Win-Box', showMini = false, mini = false, onMiniToggle, showPin = false, pinTop = false, onPinToggle, variant = 'win' }: TitleBarProps) {
+export default function TitleBar({ title = 'Win-Box', showMini = false, mini = false, onMiniToggle, showPin = false, pinTop = false, onPinToggle, variant = isMacRenderer() ? 'mac' : 'win' }: TitleBarProps) {
   const [max, setMax] = useState(false);
   const [icon, setIcon] = useState('');
   useEffect(() => {
@@ -53,12 +54,53 @@ export default function TitleBar({ title = 'Win-Box', showMini = false, mini = f
           <button className="ap-light ap-light-min" title="最小化" aria-label="最小化" onClick={() => void client.winMinimize()}>
             <svg width="7" height="7" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.2 4h5.6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
           </button>
-          <button className="ap-light ap-light-zoom" title={max ? '还原' : '最大化'} aria-label="最大化" onClick={() => void toggleMax()}>
+          <button className="ap-light ap-light-zoom" title={isMacRenderer() ? (max ? '还原' : '缩放') : (max ? '还原' : '最大化')} aria-label={isMacRenderer() ? '缩放' : '最大化'} onClick={() => void toggleMax()}>
             <svg width="7" height="7" viewBox="0 0 8 8" aria-hidden="true">
               <path d="M1.5 3V1.5H3M6.5 5v1.5H5M1.5 5v1.5H3M6.5 3V1.5H5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
         </div>
+        {(showMini || showPin) && (
+          <div className="ap-extra" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            {showPin && (
+              <button
+                className={`tb-btn tb-pin${pinTop ? ' tb-pin-on' : ''}`}
+                title={pinTop ? '置顶：开（点击取消）' : '置顶：关（点击把窗口固定在最上层）'}
+                aria-pressed={pinTop}
+                onClick={() => onPinToggle?.()}
+              >
+                {pinTop ? (
+                  <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true">
+                    <path fill="currentColor" d="M9.6 3h4.8l.7 6.1 3.1 3.1V14H5.8v-1.8l3.1-3.1L9.6 3Z" />
+                    <path d="M12 14v6.6" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                  </svg>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M9.6 3h4.8l.7 6.1 3.1 3.1V14H5.8v-1.8l3.1-3.1L9.6 3Z" />
+                    <path d="M12 14v6.6" />
+                  </svg>
+                )}
+              </button>
+            )}
+            {showMini && (
+              <button className="tb-btn" title={mini ? '恢复原窗口' : '小窗口'} onClick={() => onMiniToggle?.()}>
+                {mini ? (
+                  <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
+                    <rect x="2.5" y="2.5" width="11" height="11" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+                    <path d="M6.5 9.5V6.5h3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M6.5 6.5l3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
+                    <rect x="2.5" y="5" width="8.5" height="8.5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+                    <path d="M10 3l3.2 2.5-3.2.5z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M5 2.5h8.5M13.5 2.5V11" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     );
   }

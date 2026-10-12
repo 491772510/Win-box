@@ -303,6 +303,24 @@ function AppShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loc.pathname]);
 
+  /**
+   * ★ macOS 适配（T05）：菜单「设置…」（Cmd+,）→ **直达配置页**。
+   *   理由：macOS HIG 强约定 —— 菜单里写着「设置…」，按 Cmd+, 就该**进入**偏好设置界面，
+   *   只聚焦窗口、停在原页会被 macOS 用户立刻察觉为「半成品」（本次适配目标「像 Mac 应用」）。
+   *   主进程 `src/main/index.ts` 的 `onPreferences` 是**广播到所有窗口**（`getAllWindows()`），
+   *   因此这里必须只让**主窗口**响应：播放器窗口只有 `/player` 一条路由（跳过去会白屏）、
+   *   详情/搜索子窗口也不该被改道 —— 故三者一律跳过。
+   *   win32 无该菜单项 → 不会产生广播，此监听在 win32 上是无害 no-op（无需按平台加条件）。
+   *   `onGotoSettings` 直接返回 preload 的退订函数 → 作为 effect cleanup，不泄漏 IPC 监听器。
+   */
+  useEffect(() => {
+    if (loc.pathname === '/player' || isDetailWindow() || isSearchWindow()) return;
+    return client.onGotoSettings(() => {
+      nav('/config');
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loc.pathname]);
+
   // 独立播放器窗口：#/player 时渲染无侧栏的播放界面（独立 BrowserWindow 使用）
   const isPlayerWin = loc.pathname === '/player';
 

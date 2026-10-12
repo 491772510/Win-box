@@ -239,3 +239,134 @@ describe('JarSpiderBridge.callPython — spawn python.exe runner.py', () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 });
+
+// ============================================================================
+// ★ macOS 适配（T05）：python 运行时平台化。
+//   darwin：解释器用系统 python3（**不下载 Windows embeddable 包**）、site-packages 走
+//           `lib/python3.x/site-packages`、二进制 wheel 用 macosx 标签（按架构二选一）；
+//   win32 ：行为逐字节不变（Lib/site-packages + python.exe + win_amd64）。
+//   平台/架构注入统一走 process.env（vitest vmThreads 下 globalThis 不共享）。
+// ============================================================================
+describe('python 运行时平台化（darwin vs win32）', () => {
+  afterEach(() => {
+    for (const d of dirs) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    dirs.length = 0;
+    spawnMock.mockReset();
+    delete process.env.WINBOX_TEST_PLATFORM;
+    delete process.env.WINBOX_TEST_ARCH;
+  });
+
+  type Priv = {
+    pyExeCandidates(d: string): string[];
+    pyExePath(d: string): string;
+    pyExeReady(d: string): boolean;
+    pySitePackages(d: string): string;
+    pyEnvExtra(d: string): Record<string, string>;
+    wheelVariant(w: unknown): { name: string; file: string; platform?: string };
+  };
+  const priv = (b: JarSpiderBridge): Priv => b as never as Priv;
+  const pyWheels = (): Array<Record<string, unknown>> =>
+    (JarSpiderBridge as never as { PY_WHEELS: Array<Record<string, unknown>> }).PY_WHEELS;
+
+  it('darwin：site-packages 走 lib/python3.11/site-packages；解释器是系统 python3（无 .exe）', () => {
+    process.env.WINBOX_TEST_PLATFORM = 'darwin';
+    const { jvmDir, pyDir } = tmpCache();
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, makeHost(fakeEmbedZip()));
+    const dir = join(pyDir, '3.11.6');
+
+    expect(priv(bridge).pySitePackages(dir)).toBe(join(dir, 'lib', 'python3.11', 'site-packages'));
+    // 解释器候选来自系统 python3 探测（Homebrew → /usr/local/bin → /usr/bin），绝不是随包 python.exe
+    const cands = priv(bridge).pyExeCandidates(dir);
+    expect(cands.length).toBeGreaterThan(0);
+    expect(cands.every((c) => c.endsWith('python3'))).toBe(true);
+    expect(cands).toContain('/usr/bin/python3');
+    expect(priv(bridge).pyExePath(dir).endsWith('python.exe')).toBe(false);
+    // PYTHONPATH 注入自建 site-packages（darwin 必备；win32 由 embed 的 _pth 负责 → 空对象）
+    expect(priv(bridge).pyEnvExtra(dir)).toEqual({ PYTHONPATH: join(dir, 'lib', 'python3.11', 'site-packages') });
+  });
+
+  it('darwin：python3 探测覆盖 PATH（pyenv / conda / asdf）；win32 不受 PATH 影响（断言证据）', () => {
+    const { jvmDir, pyDir } = tmpCache();
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, makeHost(fakeEmbedZip()));
+    const dir = join(pyDir, '3.11.6');
+    const savedPath = process.env.PATH;
+    try {
+      // 只放一条 POSIX 风格目录（无 ':' 分隔符，避免被 pathBinDirs 按 ':' 拆碎）→ darwin 下成为一条 PATH 目录
+      process.env.PATH = '/opt/pyenv/shims';
+
+      // darwin：PATH 里的 python3 必须进入候选（否则 pyenv 用户被误判成「未安装 python3」）
+      process.env.WINBOX_TEST_PLATFORM = 'darwin';
+      const macCands = priv(bridge).pyExeCandidates(dir);
+      expect(macCands).toContain('/opt/pyenv/shims/python3');
+      expect(macCands).toContain('/usr/bin/python3'); // 固定 bin 目录仍在
+      expect(macCands.every((c) => c.endsWith('python3'))).toBe(true); // 仍全是 python3，绝不是 python.exe
+
+      // win32：候选恒为随包 python.exe，与 PATH 完全无关（不受本次改动影响）
+      delete process.env.WINBOX_TEST_PLATFORM;
+      expect(priv(bridge).pyExeCandidates(dir)).toEqual([join(dir, 'python.exe')]);
+      expect(priv(bridge).pyExePath(dir)).toBe(join(dir, 'python.exe'));
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      delete process.env.WINBOX_TEST_PLATFORM;
+    }
+  });
+
+  it('win32（缺省，零回归）：site-packages 走 Lib/site-packages；解释器 python.exe；PYTHONPATH 不注入', () => {
+    const { jvmDir, pyDir } = tmpCache();
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, makeHost(fakeEmbedZip()));
+    const dir = join(pyDir, '3.11.6');
+
+    expect(priv(bridge).pySitePackages(dir)).toBe(join(dir, 'Lib', 'site-packages'));
+    expect(priv(bridge).pyExeCandidates(dir)).toEqual([join(dir, 'python.exe')]);
+    expect(priv(bridge).pyExePath(dir)).toBe(join(dir, 'python.exe'));
+    expect(priv(bridge).pyEnvExtra(dir)).toEqual({});
+  });
+
+  it('darwin：二进制 wheel 选 macosx 标签（arm64 ↔ x64 按架构二选一；universal2 通用）', () => {
+    process.env.WINBOX_TEST_PLATFORM = 'darwin';
+    const { jvmDir, pyDir } = tmpCache();
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, makeHost(fakeEmbedZip()));
+
+    const lxml = pyWheels().find((w) => w.name === 'lxml')!;
+    const pillow = pyWheels().find((w) => w.name === 'PIL')!;
+
+    process.env.WINBOX_TEST_ARCH = 'arm64';
+    expect(priv(bridge).wheelVariant(lxml).file).toBe('lxml-5.2.1-cp311-cp311-macosx_10_9_universal2.whl');
+    expect(String(priv(bridge).wheelVariant(lxml).platform)).toContain('macosx_10_9_universal2');
+    expect(priv(bridge).wheelVariant(pillow).file).toBe('pillow-10.2.0-cp311-cp311-macosx_11_0_arm64.whl');
+
+    process.env.WINBOX_TEST_ARCH = 'x64';
+    expect(priv(bridge).wheelVariant(pillow).file).toBe('pillow-10.2.0-cp311-cp311-macosx_10_10_x86_64.whl');
+    expect(String(priv(bridge).wheelVariant(pillow).platform)).toContain('x86_64');
+  });
+
+  it('win32（缺省，零回归）：二进制 wheel 仍是 win_amd64', () => {
+    const { jvmDir, pyDir } = tmpCache();
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, makeHost(fakeEmbedZip()));
+    const lxml = pyWheels().find((w) => w.name === 'lxml')!;
+    expect(priv(bridge).wheelVariant(lxml).file).toBe('lxml-4.9.2-cp311-cp311-win_amd64.whl');
+    expect(priv(bridge).wheelVariant(lxml).platform).toBe('cp311-cp311-win_amd64');
+  });
+
+  it('darwin：**绝不**下载 Windows embeddable 包；探测不到 python3 时给出中文 brew 指引', async () => {
+    process.env.WINBOX_TEST_PLATFORM = 'darwin';
+    const { jvmDir, pyDir } = tmpCache();
+    const host = makeHost(fakeEmbedZip());
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, host);
+    const runtime = (b: JarSpiderBridge) => (b as never as { ensurePythonRuntime(): Promise<string> }).ensurePythonRuntime();
+
+    let err: Error | null = null;
+    try { await runtime(bridge); } catch (e) { err = e as Error; }
+
+    const reqs = (host as never as { http: { request: { mock: { calls: unknown[][] } } } }).http.request.mock.calls;
+    // 核心锁：darwin 不发起 embed-amd64 下载（那是 Windows 专用 .exe 包）
+    expect(reqs.filter((c) => String((c[0] as { url: string }).url).includes('embed-amd64')).length).toBe(0);
+    expect(spawnMock).not.toHaveBeenCalled();
+    // 探测不到系统 python3 时（本机 CI 常态）→ 抛中文人话指引，供 PySpider 转 PY_UNSUPPORTED 上屏
+    if (err) expect(err.message).toMatch(/brew install python@3\.11/);
+  });
+});
+

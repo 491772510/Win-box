@@ -8,6 +8,7 @@
 //
 // 决策与迁移逻辑（纯函数）在 dataDir.ts；本文件只做 electron 接线与结果上报。
 import { app } from 'electron';
+import { platformName } from '../../shared/platform';
 import { ensureWritableDir, migrateLegacy, planDataDir, type MigrateOutcome } from './dataDir';
 
 export interface DataDirReport {
@@ -30,6 +31,8 @@ function bootstrap(): DataDirReport {
     exePath: app.getPath('exe'),
     portableExecutableDir: process.env.PORTABLE_EXECUTABLE_DIR,
     defaultUserData: legacyDefault,
+    // ★ 2026-10-12（macOS 适配 P0-8）：darwin → activate=false（不 setPath / 不迁移 / 不删旧目录）
+    platform: platformName(),
   });
   if (!plan.activate) {
     return { mode: 'dev', target: plan.legacy, planned: plan.target, legacy: plan.legacy };

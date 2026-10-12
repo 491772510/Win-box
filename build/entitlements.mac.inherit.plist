@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- ============================================================
+	     嵌套二进制（.app 内部的子进程）继承的授权文件
+	     对应 package.json → build.mac.entitlementsInherit
+	     适用对象：Contents/Resources 下的 mpv / ffmpeg / ffprobe /
+	               aria2c / java / python3 及其 dylib
+
+	     ★ com.apple.security.inherit 必须存在：它让嵌套二进制「继承」父级签名授权，
+	       这样内部的 entitlements 无需重复声明、且签名校验能形成一条完整信任链。
+	     ============================================================ -->
+	<key>com.apple.security.inherit</key>
+	<true/>
+
+	<!-- JVM / CPython 的 JIT -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+
+	<!-- JIT 与自修改代码所需的未签名可执行内存 -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!-- 随包二进制通过 DYLD_* 定位自身依赖库 -->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+
+	<!-- 加载第三方未签名 dylib（mpv/ffmpeg/aria2c/java/python3 自带的依赖库） -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

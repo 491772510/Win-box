@@ -13,6 +13,7 @@ import { THEME_LABELS, type Theme } from '../lib/themeTokens';
 import { DEFAULT_META_SETTINGS, type MetaSettings } from '../../shared/meta';
 import { DEFAULT_PLAYER_SETTINGS, type PlayerSettings, type MpvStatus } from '../../shared/player';
 import type { DavServer } from '../../shared/webdav';
+import { isMacRenderer } from '../lib/platform';
 
 type TabId = 'sources' | 'health' | 'profiles' | 'account' | 'storage' | 'appearance' | 'play' | 'shortcut' | 'network' | 'backup';
 
@@ -65,6 +66,7 @@ function FlagSelect({ label, hint, value, onChange }: { label: string; hint: str
 }
 
 export default function ConfigPage() {
+  const mac = isMacRenderer();
   const [url, setUrl] = useState('');
   /** ★ 2026-09-27（用户要求）：导入时可自填订阅名；留空 → 主进程按「新订阅 xx」/ 本地文件名自动命名 */
   const [subName, setSubName] = useState('');
@@ -151,7 +153,12 @@ export default function ConfigPage() {
       setBtMsg(
         list.length
           ? { text: `检测到 ${list.length} 个：${list.map((p) => p.name).join('、')}（点名字填入路径）`, kind: 'ok' }
-          : { text: '未检测到常见播放器：可安装 PotPlayer / VLC / mpv / MPC-HC，或手动粘贴播放器 exe 路径', kind: 'err' },
+          : {
+              text: mac
+                ? '未检测到常见播放器：可安装 VLC / IINA / mpv，或手动粘贴播放器路径（如 /Applications/VLC.app/Contents/MacOS/VLC）'
+                : '未检测到常见播放器：可安装 PotPlayer / VLC / mpv / MPC-HC，或手动粘贴播放器 exe 路径',
+              kind: 'err',
+            },
       );
     } catch (e) {
       setBtMsg({ text: `检测失败：${(e as Error).message}`, kind: 'err' });
@@ -163,7 +170,11 @@ export default function ConfigPage() {
       setPlayPrefs(s);
       setBtPlayerDraft(null);
       setBtMsg({
-        text: s.btExternalPlayer ? '已保存：磁力的 MKV / HEVC 将用该播放器打开' : '已清空：恢复自动检测（PotPlayer → VLC → mpv → MPC-HC）',
+        text: s.btExternalPlayer
+          ? '已保存：磁力的 MKV / HEVC 将用该播放器打开'
+          : mac
+            ? '已清空：恢复自动检测（VLC → IINA → mpv）'
+            : '已清空：恢复自动检测（PotPlayer → VLC → mpv → MPC-HC）',
         kind: 'ok',
       });
     } catch (e) {
@@ -188,7 +199,12 @@ export default function ConfigPage() {
           ? { text: '已停用：点播一律用内置播放器（已填路径也不会用它）', kind: 'ok' }
           : pathNow
             ? { text: '已启用：点播将直接用上面的播放器播放', kind: 'ok' }
-            : { text: '已启用，但还没填播放器路径 —— 请点「检测」选择本机播放器，或粘贴 exe 路径后点「保存」', kind: 'err' },
+            : {
+                text: mac
+                  ? '已启用，但还没填播放器路径 —— 请点「检测」选择本机播放器，或粘贴播放器路径后点「保存」'
+                  : '已启用，但还没填播放器路径 —— 请点「检测」选择本机播放器，或粘贴 exe 路径后点「保存」',
+                kind: 'err',
+              },
       );
     } catch (e) {
       setVodMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
@@ -201,7 +217,12 @@ export default function ConfigPage() {
       setVodMsg(
         list.length
           ? { text: `检测到 ${list.length} 个：${list.map((p) => p.name).join('、')}（点名字填入路径）`, kind: 'ok' }
-          : { text: '未检测到常见播放器：可安装 PotPlayer / VLC / mpv / MPC-HC，或手动粘贴播放器 exe 路径', kind: 'err' },
+          : {
+              text: mac
+                ? '未检测到常见播放器：可安装 VLC / IINA / mpv，或手动粘贴播放器路径（如 /Applications/VLC.app/Contents/MacOS/VLC）'
+                : '未检测到常见播放器：可安装 PotPlayer / VLC / mpv / MPC-HC，或手动粘贴播放器 exe 路径',
+              kind: 'err',
+            },
       );
     } catch (e) {
       setVodMsg({ text: `检测失败：${(e as Error).message}`, kind: 'err' });
@@ -1487,8 +1508,8 @@ export default function ConfigPage() {
       </div>
 
       {/* ★ 2026-10-08（用户要求「整体重做界面视觉与动效交互」）：界面动效三态。
-          默认跟随系统；若系统关了「动画效果」（Windows 设置 → 辅助功能 → 视觉效果），
-          系统偏好会让浏览器折叠一切动画 —— 这里可强制开启。 */}
+          默认跟随系统；系统关闭动画效果时，系统偏好会让浏览器折叠一切动画 —— 这里可强制开启。
+          设置入口因平台而异：macOS「系统设置 → 辅助功能 → 显示」；Windows「设置 → 辅助功能 → 视觉效果」。 */}
       <div className="card" id="cfg-motion" style={{ padding: 12, marginBottom: 16 }}>
         <div className="row" style={{ marginBottom: 8 }}>
           <span className="muted" style={{ fontWeight: 600 }}>界面动效</span>
@@ -1565,7 +1586,9 @@ export default function ConfigPage() {
           </span>
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
             <input
-              placeholder="播放器 exe 路径（留空 = 自动检测 PotPlayer / VLC / mpv / MPC-HC）…"
+              placeholder={mac
+                ? '播放器路径（留空 = 自动检测 VLC / IINA / mpv）…'
+                : '播放器 exe 路径（留空 = 自动检测 PotPlayer / VLC / mpv / MPC-HC）…'}
               value={btPlayerValue}
               style={{ flex: 1 }}
               onChange={(e) => setBtPlayerDraft(e.target.value)}
@@ -1593,7 +1616,7 @@ export default function ConfigPage() {
       {/* ★ 2026-10-08（用户要求）：改为**勾选项**总开关 —— 不勾选时即使填了路径也用内置播放器 */}
       <div className="card" id="cfg-vod-player" style={{ padding: 12, marginBottom: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <span style={{ fontWeight: 600 }}>点播外部播放器（PotPlayer 等）</span>
+          <span style={{ fontWeight: 600 }}>{mac ? '点播外部播放器（VLC / IINA 等）' : '点播外部播放器（PotPlayer 等）'}</span>
           <span className="muted" style={{ fontSize: 11 }}>
             勾选后：点播<b>直接用它播放</b>（不再开内置播放器；走本机中继，header / cookie 已注入；
             从历史播放会自动带上次进度）——需同时填好下面的播放器路径。
@@ -1609,7 +1632,9 @@ export default function ConfigPage() {
           </label>
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
             <input
-              placeholder="播放器 exe 路径（点「检测」自动探测 PotPlayer / VLC / mpv / MPC-HC）…"
+              placeholder={mac
+                ? '播放器路径（点「检测」自动探测 VLC / IINA / mpv）…'
+                : '播放器 exe 路径（点「检测」自动探测 PotPlayer / VLC / mpv / MPC-HC）…'}
               value={vodPlayerValue}
               style={{ flex: 1 }}
               onChange={(e) => setVodPlayerDraft(e.target.value)}
@@ -1651,7 +1676,9 @@ export default function ConfigPage() {
           </span>
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
             <input
-              placeholder="mpv.exe 路径覆盖（留空 = 用随包内置构建）…"
+              placeholder={mac
+                ? 'mpv 路径覆盖（留空 = 用随包内置构建）…'
+                : 'mpv.exe 路径覆盖（留空 = 用随包内置构建）…'}
               value={mpvDraft ?? playPrefs.mpvPath}
               style={{ flex: 1 }}
               onChange={(e) => setMpvDraft(e.target.value)}

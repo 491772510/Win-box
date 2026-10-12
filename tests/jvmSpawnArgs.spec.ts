@@ -185,3 +185,100 @@ describe('JarSpiderBridge.call — spawn argv 强制 UTF-8（任务 A）', () =>
   });
 });
 
+// ============================================================================
+// ★ macOS 适配（T05）：classpath 平台分隔符 + 缓存键分隔符**分离**的锁死测试。
+//
+//   - 真实传给 JVM 的 classpath（-cp / 加载器参数 / -Dtvbox.d2j.cp）在 darwin 必须用 ':'
+//     —— 否则 JVM 把整串当成一个路径，整个 JVM 桥失效（真 bug）。
+//   - 但同一批 jar 的**缓存身份键**（keyJoin：shimPreferred / fallbackKey / jarKey）
+//     必须**永久保持 ';'**，否则 darwin 与 win32 会算出不同的缓存身份（跨平台缓存不一致）。
+//
+//   平台注入用 process.env.WINBOX_TEST_PLATFORM（vitest vmThreads 下 globalThis 不共享，
+//   withPlatform 包不住「import 即执行」的模块，故 spec 统一走 env）。
+// ============================================================================
+describe('classpath 平台分隔符与缓存键（darwin vs win32）', () => {
+  let dirs: string[] = [];
+  beforeEach(() => {
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => fakeChild());
+  });
+  afterEach(() => {
+    for (const d of dirs) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    dirs = [];
+    delete process.env.WINBOX_TEST_PLATFORM;
+  });
+
+  /** macOS 布局的 jvmDir：jre/bin/java（无 .exe）+ 多个 libs/d2j jar 以便观察分隔符 */
+  function makeMacBridge(): { bridge: JarSpiderBridge; dir: string } {
+    const dir = join(tmpdir(), `tvm-mac-args-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(join(dir, 'jre', 'bin'), { recursive: true });
+    writeFileSync(join(dir, 'jre', 'bin', 'java'), 'stub'); // macOS：解释器无 .exe 后缀
+    mkdirSync(join(dir, 'libs'), { recursive: true });
+    writeFileSync(join(dir, 'libs', 'a.jar'), 'stub');
+    writeFileSync(join(dir, 'libs', 'b.jar'), 'stub');
+    mkdirSync(join(dir, 'd2j'), { recursive: true });
+    writeFileSync(join(dir, 'd2j', 't1.jar'), 'stub');
+    writeFileSync(join(dir, 'd2j', 't2.jar'), 'stub');
+    const bridge = new JarSpiderBridge(
+      { jvmDir: dir, cacheDir: join(dir, 'cache') },
+      { http: {}, kv: {}, logger: NullLogger } as never,
+    );
+    return { bridge, dir };
+  }
+
+  it('darwin：解释器用 jre/bin/java，真实 -cp / 加载器参数 / -Dtvbox.d2j.cp 全用 ":"', async () => {
+    process.env.WINBOX_TEST_PLATFORM = 'darwin';
+    const { bridge, dir } = makeMacBridge();
+    dirs.push(dir);
+    const p = bridge.call([join(dir, '1.jar'), join(dir, '2.jar')], 'com.x.Y', 'homeContent', ['[]']);
+    const child = spawnMock.mock.results[0].value as ReturnType<typeof fakeChild>;
+    child.stdout.emit('data', Buffer.from('{"list":[]}'));
+    child.emit('close', 0);
+    await p;
+
+    // ① 解释器：darwin 命中 `jre/bin/java`（无 .exe）
+    expect(spawnMock.mock.calls[0][0]).toBe(join(dir, 'jre', 'bin', 'java'));
+    const argv = spawnMock.mock.calls[0][1] as string[];
+
+    // ② 真实 -cp（父加载器运行时：stubs.jar + libs/*.jar）用 ':'，绝不含 ';'
+    const cp = argv[argv.indexOf('-cp') + 1];
+    expect(cp).toContain('stubs.jar');
+    expect(cp).toContain(':');
+    expect(cp).not.toContain(';');
+
+    // ③ SpiderRunner 的加载器参数（蜘蛛 jar 列表）也用 ':'
+    const loadCp = argv[argv.indexOf('SpiderRunner') + 1];
+    expect(loadCp).toBe(`${join(dir, '1.jar')}:${join(dir, '2.jar')}`);
+
+    // ④ 透传给子 JVM 的 dex2jar 参数：.java 指向 java（无 .exe），.cp 用 ':'
+    expect(argv.find((a) => a.startsWith('-Dtvbox.d2j.java='))).toBe(`-Dtvbox.d2j.java=${join(dir, 'jre', 'bin', 'java')}`);
+    const d2jCp = String(argv.find((a) => a.startsWith('-Dtvbox.d2j.cp='))).slice('-Dtvbox.d2j.cp='.length);
+    expect(d2jCp).toContain(':');
+    expect(d2jCp).not.toContain(';');
+  });
+
+  it('darwin：真实 classpath 用 ":"，但缓存身份键仍是 ";"（跨平台缓存一致，勿回退）', () => {
+    process.env.WINBOX_TEST_PLATFORM = 'darwin';
+    const dir = join(tmpdir(), `tvm-mac-key-${Date.now()}`);
+    dirs.push(dir);
+    const bridge = new JarSpiderBridge({ jvmDir: dir, cacheDir: join(dir, 'cache') }, { http: {}, kv: {}, logger: NullLogger } as never);
+    const priv = bridge as unknown as { cpJoin(p: string[]): string; keyJoin(p: string[]): string };
+    expect(priv.cpJoin(['a', 'b'])).toBe('a:b');  // 真实 classpath → 平台分隔符
+    expect(priv.keyJoin(['a', 'b'])).toBe('a;b'); // 缓存键 → 永久 ';'
+    expect(priv.cpJoin(['a', 'b'])).not.toBe(priv.keyJoin(['a', 'b']));
+  });
+
+  it('win32（缺省平台，零回归）：cpJoin 与 keyJoin 都是 ";"，且解释器是 java.exe', () => {
+    const dir = join(tmpdir(), `tvm-win-key-${Date.now()}`);
+    dirs.push(dir);
+    const bridge = new JarSpiderBridge({ jvmDir: dir, cacheDir: join(dir, 'cache') }, { http: {}, kv: {}, logger: NullLogger } as never);
+    const priv = bridge as unknown as { cpJoin(p: string[]): string; keyJoin(p: string[]): string; javaExePath(): string };
+    expect(priv.cpJoin(['a', 'b'])).toBe('a;b');
+    expect(priv.keyJoin(['a', 'b'])).toBe('a;b');
+    // win32 的 javaExePath 与历史一致：jre/bin/java.exe
+    expect(priv.javaExePath()).toBe(join(dir, 'jre', 'bin', 'java.exe'));
+  });
+});
+

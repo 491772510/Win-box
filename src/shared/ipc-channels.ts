@@ -10,6 +10,13 @@ export const IPC = {
    * 用于配置页展示与排障（「为什么还在 C 盘」这类问题看这条）。
    */
   SYSTEM_DATA_DIR: 'system:dataDir',
+  /**
+   * ★ 2026-10-12（macOS 适配 P1-2 前提）：把**归一后的平台名**暴露给渲染层。
+   *   渲染层**不能**直接 import `src/shared/platform.ts`（Vite 打包 `process.platform` 语义
+   *   不可靠），一律走这条 IPC + `src/renderer/lib/platform.ts` 的进程内缓存。
+   *   返回 `{ platform: 'win32' | 'darwin' | 'linux' }`。
+   */
+  WB_APP_PLATFORM: 'wb:app-platform',
   // 外挂字幕
   SUBTITLE_GET: 'subtitle:get',
   SUBTITLE_SET: 'subtitle:set',
@@ -116,6 +123,11 @@ export const IPC = {
   DLNA_CAST: 'dlna:cast',
   // ★ 播放网盘资源未绑定 cookie → 从任意窗口请求主窗口跳到「点播页」（源内有「网盘绑定」入口）
   UI_GOTO_DRIVE_BIND: 'ui:gotoDriveBind',
+  /**
+   * ★ 2026-10-12（macOS 适配 P1-1）：主进程 → 渲染层，Cmd+,（macOS「设置…」）跳配置页。
+   *   由 `src/main/menu.ts` 的 preferences 项触发，广播到所有窗口（渲染层自行决定是否响应）。
+   */
+  UI_GOTO_SETTINGS: 'ui:gotoSettings',
   // 主进程 → 主窗口事件：跳到点播页（播放器窗口发起时经此跨窗口跳转）
   NAV_DRIVE_BIND: 'nav:driveBind',
   WIN_MINIMIZE: 'win:minimize',

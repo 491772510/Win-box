@@ -5,12 +5,13 @@ import { IPC } from '../shared/ipc-channels';
 import type { SiteConfig, ImportReport, SourceBean, SourceMoveDirection, SourceUpdatePatch, UserConfig, UserProfile, MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage, MetaImages } from '../shared/types';
 import type { SubtitleFetchResult } from '../shared/subtitle';
 import type { MetaSettings, MetaSettingsView, MetaSuggestion } from '../shared/meta';
+import type { PlatformName } from '../shared/platform';
 
 const invoke = <T>(channel: string, ...args: unknown[]): Promise<IpcResult<T>> =>
   ipcRenderer.invoke(channel, ...args);
 
 const api = {
-  system: { ping: () => invoke<string>(IPC.SYSTEM_PING), icon: () => invoke<string>(IPC.APP_ICON), setTheme: (t: string) => invoke<void>(IPC.THEME_SET, t), quit: () => invoke<void>(IPC.APP_QUIT), dataDir: () => invoke(IPC.SYSTEM_DATA_DIR), sessionId: () => invoke<string>(IPC.SYSTEM_SESSION_ID) },
+  system: { ping: () => invoke<string>(IPC.SYSTEM_PING), icon: () => invoke<string>(IPC.APP_ICON), setTheme: (t: string) => invoke<void>(IPC.THEME_SET, t), quit: () => invoke<void>(IPC.APP_QUIT), dataDir: () => invoke(IPC.SYSTEM_DATA_DIR), sessionId: () => invoke<string>(IPC.SYSTEM_SESSION_ID), /** ★ 2026-10-12：归一化平台名（渲染层平台感知的唯一入口；见 renderer/lib/platform.ts） */ platform: () => invoke<{ platform: PlatformName }>(IPC.WB_APP_PLATFORM) },
   config: {
     import: (args: { url?: string; json?: string }) => invoke(IPC.CONFIG_IMPORT, args),
     listSites: () => invoke(IPC.CONFIG_LIST_SITES),
@@ -78,6 +79,12 @@ const api = {
       const l = () => cb();
       ipcRenderer.on(IPC.NAV_DRIVE_BIND, l);
       return () => ipcRenderer.removeListener(IPC.NAV_DRIVE_BIND, l);
+    },
+    /** ★ 2026-10-12：macOS 菜单「设置…」（Cmd+,）→ 主进程广播，渲染层据此跳配置页 */
+    onGotoSettings: (cb: () => void) => {
+      const l = () => cb();
+      ipcRenderer.on(IPC.UI_GOTO_SETTINGS, l);
+      return () => ipcRenderer.removeListener(IPC.UI_GOTO_SETTINGS, l);
     },
   },
   vod: {

@@ -546,3 +546,53 @@ describe('转换产物有效性（空 zip 残骸不得当缓存）', () => {
     expect(logs.some((l) => l.includes('转换产物已失效'))).toBe(true);
   });
 });
+
+// ============================================================================
+// ★ macOS 适配（T05）：dex2jar 真实 -cp 的平台分隔符。
+//   `-Dtvbox.d2j.cp` 与 dex2jar 子进程的 `-cp` 都来自 `cpJoin(dirJars(d2j))`：
+//   darwin 必须用 ':'，否则 JVM 把整串当成一个路径 → 转换必失败（JAR 源全灭）。
+//   平台注入走 process.env.WINBOX_TEST_PLATFORM。
+// ============================================================================
+describe('dex2jar -cp 平台分隔符（darwin 用 ":"）', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    dirs.length = 0;
+    spawnMock.mockReset();
+    delete process.env.WINBOX_TEST_PLATFORM;
+  });
+
+  it('darwin：dex2jar 进程的 -cp 用 ":"（多个 d2j jar），且解释器是 java（无 .exe）', async () => {
+    process.env.WINBOX_TEST_PLATFORM = 'darwin';
+    const dir = join(tmpdir(), `tvm-mac-res-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    dirs.push(dir);
+    // macOS JRE 布局：jre/bin/java（无 .exe）
+    mkdirSync(join(dir, 'jre', 'bin'), { recursive: true });
+    writeFileSync(join(dir, 'jre', 'bin', 'java'), 'stub');
+    mkdirSync(join(dir, 'libs'), { recursive: true });
+    // 两个 d2j jar 才能观察到分隔符
+    mkdirSync(join(dir, 'd2j'), { recursive: true });
+    writeFileSync(join(dir, 'd2j', 'dex-tools.jar'), 'stub');
+    writeFileSync(join(dir, 'd2j', 'extra-tools.jar'), 'stub');
+
+    spawnMock.mockReset();
+    mockDex2jar();
+    const raw = buildZip([{ name: 'classes.dex', bytes: Buffer.from('dex\n035 payload') }]);
+    const bridge = new JarSpiderBridge(
+      { jvmDir: dir, cacheDir: join(dir, 'converted') },
+      makeHost([], raw.toString('base64')),
+    );
+    await bridge.ensureConverted('https://example.com/mac-guard.jar');
+
+    const exe = spawnMock.mock.calls[spawnMock.mock.calls.length - 1][0] as string;
+    expect(exe).toBe(join(dir, 'jre', 'bin', 'java')); // 无 .exe
+    const argv = lastArgv();
+    const cp = argv[argv.indexOf('-cp') + 1];
+    expect(cp).toContain('dex-tools.jar');
+    expect(cp).toContain(':');
+    expect(cp).not.toContain(';');
+  });
+});
+

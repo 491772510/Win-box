@@ -7,12 +7,17 @@ import {
   initialKernelState,
   mpvCmdLine,
   mpvCommandLines,
+  mpvEmbedSupported,
   mpvFitProps,
+  mpvIpcArgs,
   mpvObserveLines,
+  mpvVideoArgs,
+  mpvWidArgs,
   reduceMpvMessage,
   resolveMpvPath,
 } from '../src/main/player/mpvCore';
 import { mpvFontSize, mpvSubPos } from '../src/shared/player';
+import { withPlatform } from '../src/shared/platform';
 
 describe('mpvCore · 启动参数', () => {
   it('关键旗标齐全：--wid 嵌入 / JSON IPC / idle / keep-open / 硬解 / 不抢输入', () => {
@@ -54,6 +59,94 @@ describe('mpvCore · 启动参数', () => {
     expect(a).toContain('--speed=99'); // 启动参数不钳，运行期命令钳（见 mpvCommandLines）
     const lines = mpvCommandLines({ type: 'rate', value: 99 });
     expect(lines[0]).toContain('"speed",4');
+  });
+});
+
+// ★ 2026-10-12（macOS 适配 T03 §3.7）：视频输出参数平台化。
+//   ★★ 最高优先级是「win32 零回归」：下面的逐项逐序断言就是这条红线。★★
+describe('mpvCore · 启动参数平台化（win32 零回归 / darwin 无 d3d11）', () => {
+  it('★ win32：buildMpvArgs 与改动前**逐项逐序完全相同**（d3d11 三参顺序不动、hwdec 在 --vo 之前）', () => {
+    const args = buildMpvArgs({
+      pipe: '\\\\.\\pipe\\winbox-mpv-1',
+      wid: '123456',
+      platform: 'win32',
+    });
+    expect(args).toEqual([
+      '--no-config',
+      '--idle=yes',
+      '--force-window=yes',
+      '--keep-open=yes',
+      '--hwdec=auto-safe',
+      '--vo=gpu',
+      '--gpu-api=d3d11',
+      '--gpu-context=d3d11',
+      '--d3d11-feature-level=11_0',
+      '--osc=no',
+      '--input-default-bindings=no',
+      '--input-vo-keyboard=no',
+      '--msg-level=all=error',
+      '--wid=123456',
+      '--input-ipc-server=\\\\.\\pipe\\winbox-mpv-1',
+      // 末尾是 fit（缺省 contain）展开
+      '--keepaspect=yes',
+      '--panscan=0',
+      '--video-unscaled=no',
+      '--video-aspect-override=no',
+    ]);
+  });
+
+  it('★ win32：显式 platform 与缺省（真实平台）在 Windows 上逐项一致', () => {
+    const o = { pipe: 'p', wid: '1', start: 10, volume: 0.5, rate: 1.5, fit: 'cover' };
+    if (process.platform === 'win32') {
+      expect(buildMpvArgs(o)).toEqual(buildMpvArgs({ ...o, platform: 'win32' }));
+    }
+    // 视频输出段（d3d11 三参）必须原样在参数里
+    expect(buildMpvArgs({ ...o, platform: 'win32' }).filter((a) => /d3d11|gpu-api|gpu-context|hwdec|vo=gpu/.test(a)))
+      .toEqual(mpvVideoArgs('win32'));
+  });
+
+  it('★ darwin：不出现任何 d3d11 参数，gpu-api / gpu-context 交给 mpv 自选，保留 auto-safe 硬解', () => {
+    const args = buildMpvArgs({ pipe: '/tmp/winbox-mpv-1.sock', wid: '140234', platform: 'darwin' });
+    expect(args.join(' ')).not.toMatch(/d3d11/i);
+    expect(args).toContain('--gpu-api=auto');
+    expect(args).toContain('--gpu-context=auto');
+    expect(args).toContain('--hwdec=auto-safe');
+    expect(args).toContain('--vo=gpu');
+    expect(args).toContain('--input-ipc-server=/tmp/winbox-mpv-1.sock');
+    // 公共旗标与 win32 一致（只有视频输出那一段不同）
+    for (const f of ['--no-config', '--idle=yes', '--force-window=yes', '--keep-open=yes', '--osc=no', '--input-default-bindings=no', '--input-vo-keyboard=no', '--msg-level=all=error']) {
+      expect(args).toContain(f);
+    }
+  });
+
+  it('★ 视频参数单元：win32 与改动前逐项相同；darwin 一个 d3d11 都没有', () => {
+    expect(mpvVideoArgs('win32')).toEqual([
+      '--hwdec=auto-safe',
+      '--vo=gpu',
+      '--gpu-api=d3d11',
+      '--gpu-context=d3d11',
+      '--d3d11-feature-level=11_0',
+    ]);
+    expect(mpvVideoArgs('darwin')).toEqual(['--vo=gpu', '--gpu-api=auto', '--gpu-context=auto', '--hwdec=auto-safe']);
+    expect(mpvVideoArgs('darwin').some((a) => /d3d11/i.test(a))).toBe(false);
+  });
+
+  it('★ wid 参数受嵌入开关控制：darwin + WINBOX_MAC_MPV_EMBED=0 → 不下发 --wid（降级为独立窗口）', () => {
+    expect(mpvWidArgs('140234', 'darwin', {})).toEqual(['--wid=140234']);
+    expect(mpvWidArgs('140234', 'darwin', { WINBOX_MAC_MPV_EMBED: '0' })).toEqual([]);
+    const args = buildMpvArgs({ pipe: 'p', wid: '140234', platform: 'darwin', env: { WINBOX_MAC_MPV_EMBED: '0' } });
+    expect(args.some((a) => a.startsWith('--wid='))).toBe(false);
+    expect(args).toContain('--input-ipc-server=p'); // IPC 仍要有：独立窗口也能被控制
+  });
+
+  it('★ win32 嵌入开关恒 true（环境变量关不掉，既有行为）', () => {
+    expect(mpvEmbedSupported({ WINBOX_MAC_MPV_EMBED: '0' }, 'win32')).toBe(true);
+    expect(mpvWidArgs('7', 'win32', { WINBOX_MAC_MPV_EMBED: '0' })).toEqual(['--wid=7']);
+  });
+
+  it('IPC 参数与平台无关（只是同一形态的单一参数）', () => {
+    expect(mpvIpcArgs('\\\\.\\pipe\\winbox-mpv-2')).toEqual(['--input-ipc-server=\\\\.\\pipe\\winbox-mpv-2']);
+    expect(mpvIpcArgs('/tmp/winbox-mpv-2.sock', 'darwin')).toEqual(['--input-ipc-server=/tmp/winbox-mpv-2.sock']);
   });
 });
 
@@ -304,7 +397,12 @@ describe('mpvCore · mpv.exe 解析链（配置覆盖 → 随包内置 → 本�
   });
 
   it('内置缺失 → 本机常见安装位置（Program Files\\mpv\\mpv.exe）', () => {
-    const r = resolveMpvPath({ bundled, env, exists: (p) => p === 'C:\\PF\\mpv\\mpv.exe' });
+    // ★ 2026-10-12：`resolveMpvPath` 内部按平台取候选（`playerCandidates(env)`），
+    //   而平台默认值会读进程级全局 `WINBOX_TEST_PLATFORM`（并行 spec 可能写 darwin）
+    //   → 必须显式在 win32 语义下断言，否则随机失败。
+    const r = withPlatform('win32', () =>
+      resolveMpvPath({ bundled, env, exists: (p) => p === 'C:\\PF\\mpv\\mpv.exe' }),
+    );
     expect(r).toEqual({ path: 'C:\\PF\\mpv\\mpv.exe', source: 'system' });
   });
 

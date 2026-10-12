@@ -4,6 +4,7 @@ import { useRef } from 'react';
 import { createPortal } from 'react-dom';
 import supportImage from '@author-support-image';
 import groupJoinImage from '@group-join-image';
+import { isMacRenderer } from '../lib/platform';
 
 /** 项目主页（源码 / 更新发布） */
 const GITHUB_URL = 'https://github.com/yagami-hue/Win-box';
@@ -15,6 +16,7 @@ function openExternal(url: string) {
 export default function AboutPage() {
   const supportDialog = useRef<HTMLDialogElement>(null);
   const groupDialog = useRef<HTMLDialogElement>(null);
+  const mac = isMacRenderer();
   return (
     <>
       <div className="topbar">
@@ -109,6 +111,27 @@ export default function AboutPage() {
             本软件不含任何付费内容、会员或解锁机制；赞助与任何第三方内容、平台亦无关联，不构成对任何内容的购买或授权。
           </p>
         </section>
+
+        {mac && (
+          <section className="about-sec">
+            <h3>八、首次打开被系统拦截怎么办</h3>
+            <p>
+              若 macOS 提示应用来自身份不明的开发者，请先在 Finder 中右键 Win-Box 并选择「打开」。
+              若仍被拦截，请前往「系统设置 → 隐私与安全性」，在安全性提示旁点击「仍要打开」。
+            </p>
+            <p>
+              更完整的签名、隔离属性与 Gatekeeper 排查步骤见{' '}
+              <button
+                type="button"
+                className="linkbtn"
+                onClick={() => openExternal(`${GITHUB_URL}/blob/main/docs/macos-build.md#首次打开与-gatekeeper`)}
+              >
+                macOS 构建与首次打开说明
+              </button>
+              。
+            </p>
+          </section>
+        )}
       </div>
       {createPortal(
         <dialog

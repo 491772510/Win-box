@@ -18,6 +18,7 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { SAFE_USERDATA_SUBDIRS } from './cacheClean';
+import { platformName, shouldRelocateUserData, type PlatformName } from '../../shared/platform';
 
 export interface DataDirInputs {
   /** app.isPackaged */
@@ -28,6 +29,11 @@ export interface DataDirInputs {
   portableExecutableDir?: string;
   /** app.getPath('userData') 的默认值（%APPDATA%\win-box） */
   defaultUserData: string;
+  /**
+   * ★ 2026-10-12（macOS 适配 P0-8）：缺省 = 当前真实平台。
+   *   darwin → `shouldRelocateUserData() === false` → **不搬运**（activate=false）。
+   */
+  platform?: PlatformName;
 }
 
 export interface DataDirPlan {
@@ -43,12 +49,23 @@ export interface DataDirPlan {
 export function planDataDir(i: DataDirInputs): DataDirPlan {
   const legacy = i.defaultUserData;
   if (!i.isPackaged) return { legacy, target: legacy, activate: false };
+  // ★★ macOS：**绝不搬运**（userData 保持 electron-builder 默认的
+  //   `~/Library/Application Support/Win-Box`）。写进 `.app` 内部会破坏签名密封，
+  //   且 macOS 没有 Windows 老用户跨平台上机的历史包袱 → 迁移路径永不执行。
+  if (!shouldRelocateUserData(i.platform ?? platformName())) {
+    return { legacy, target: legacy, activate: false };
+  }
   const base = (i.portableExecutableDir || '').trim() || dirname(i.exePath);
   const target = join(base, 'data');
   return { legacy, target, activate: !samePath(target, legacy) };
 }
 
-/** Windows 路径大小写不敏感：统一 resolve + 小写比较 */
+/**
+ * 路径是否相同：统一 resolve + 小写比较。
+ * ★ Windows 路径大小写不敏感是硬前提；macOS 默认卷（APFS）同样大小写不敏感，
+ *   但用户可格式化为大小写敏感卷 —— 保留 `toLowerCase()`（更宽松，只会更保守地把
+ *   两条路径判为「相同」→ 不搬迁，安全方向正确）。
+ */
 export function samePath(a: string, b: string): boolean {
   return resolve(a).toLowerCase() === resolve(b).toLowerCase();
 }

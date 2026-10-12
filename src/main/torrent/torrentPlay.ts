@@ -4,7 +4,8 @@
 // 两条出口（按容器/编码自动选，见 engine/torrent/magnet 的 webPlayBlockReason）：
 //   · **内联**：mp4/webm 等 Chromium 能播的形态 → 返回本机中继地址 `http://127.0.0.1:9978/bt/<hash>/<idx>`，
 //     由 `/bt` 路由做 Range + piece 门控（`waitCovered`）；
-//   · **外部接力**：mkv/hevc 等 → 拉起已安装的桌面播放器（PotPlayer / VLC / mpv / MPC-HC），
+//   · **外部接力**：mkv/hevc 等 → 拉起已安装的桌面播放器（win32：PotPlayer / VLC / mpv / MPC-HC；
+//     ★ 2026-10-12 darwin：VLC / IINA / mpv，见 externalPlayerHint()），
 //     把同一个中继地址交给它边下边播（不内置 ffmpeg 转封装 —— 用户拍板的取舍）。
 //
 // 会话表：按 infoHash 常驻（同一磁力重复点播/切集复用已下 piece），空闲 10 分钟或超过 3 个会话时回收。
@@ -29,8 +30,17 @@ import {
 } from '../../engine/torrent/magnet';
 import { Aria2Sidecar } from './Aria2Sidecar';
 import { detectPlayers, launchPlayer } from './externalPlayer';
+import { isMac } from '../../shared/platform';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * ★ 2026-10-12（macOS 适配 §3.11）：外部播放器清单文案按平台切换。
+ *   win32 逐字不变（PotPlayer / VLC / mpv / MPC-HC）；darwin 给真实可用的 VLC / IINA / mpv。
+ */
+function externalPlayerHint(): string {
+  return isMac() ? 'VLC / IINA / mpv' : 'PotPlayer / VLC / mpv / MPC-HC';
+}
 const num = (v: unknown): number => {
   const n = typeof v === 'number' ? v : parseInt(String(v ?? ''), 10);
   return Number.isFinite(n) ? n : 0;
@@ -180,7 +190,13 @@ export class TorrentPlay {
     const existed = this.sessions.get(info.infoHash);
     if (existed) return this.handOff(existed);
     if (!this.sidecar.available()) {
-      return { kind: 'unsupported', reason: `未内置 BT 引擎（${Aria2Sidecar.exePath()} 缺失）` };
+      // ★ 2026-10-12：随包内置 → 本机（Homebrew/PATH）都探过；缺失时把人话修复指引一并带上。
+      //   win32 文案逐字不变（只是可能多一个「。请安装…」尾巴，仅在真的缺失时出现）。
+      const probe = Aria2Sidecar.resolveExe();
+      return {
+        kind: 'unsupported',
+        reason: `未内置 BT 引擎（${probe.path || Aria2Sidecar.exePath()} 缺失）${probe.hint ? `：${probe.hint}` : ''}`,
+      };
     }
     if (!(await this.sidecar.ensure())) return { kind: 'unsupported', reason: 'BT 引擎启动失败（可查日志 [aria2] 行）' };
     await this.reap();
@@ -265,7 +281,7 @@ export class TorrentPlay {
     if (!block) return { kind: 'inline', url, infoHash: s.infoHash, fileIndex: s.fileIndex, title: s.title };
     const players = detectPlayers(this.externalPlayerPath());
     if (!players.length) {
-      return { kind: 'unsupported', reason: `${block}，且未检测到外部播放器（可安装 PotPlayer / VLC / mpv / MPC-HC）` };
+      return { kind: 'unsupported', reason: `${block}，且未检测到外部播放器（可安装 ${externalPlayerHint()}）` };
     }
     const p = players[0];
     if (!launchPlayer(p.path, url)) return { kind: 'unsupported', reason: `外部播放器启动失败（${p.name}）` };

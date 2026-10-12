@@ -352,6 +352,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   //   HTML 控制条/弹幕仍绘制在 mpv 之上且点击归 HTML（PoC 实测；地址链路不变，mpv 直接吃既有 /play 中继）。
   const allowMpv = !!props.allowMpv && !isImage && !isAudio && mediaKind !== 'unsupported';
   const [mpvInfo, setMpvInfo] = useState<MpvStatus | null>(null);
+  const mpvUsable = !!(mpvInfo?.available && mpvInfo.embeddable);
   const [kernelPref, setKernelPref] = useState<KernelPref>(() => prefsRef.current!.kernel);
   const [kernel, setKernel] = useState<Kernel>('html5');
   const kernelRef = useRef<Kernel>('html5');
@@ -509,8 +510,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       setKernel('html5');
       return;
     }
-    setKernel(resolveKernel(kernelPref, url, !!mpvInfo?.available));
-  }, [allowMpv, mpvInfo, kernelPref, url]);
+    setKernel(resolveKernel(kernelPref, url, mpvUsable));
+  }, [allowMpv, mpvUsable, kernelPref, url]);
 
   // 状态事件订阅（挂载一次；实际处理交给 mpvPushRef，避免闭包过期）
   useEffect(() => {
@@ -573,7 +574,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
 
   /** mpv 可用性镜像（供 effect 内闭包读最新值） */
   const mpvAvailRef = useRef(false);
-  mpvAvailRef.current = !!mpvInfo?.available;
+  mpvAvailRef.current = mpvUsable;
   /**
    * ★ 2026-10-08 HTML5 内核失败时的兜底：偏好为「自动」且 mpv 可用 → 直接改走 mpv
    *   （4K / HEVC / HDR 这类「只有解了才知道播不动」的常见救法；显式选了 HTML5 的用户只提示、不强切）。
@@ -2205,12 +2206,12 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           <div>{err}</div>
           <div className="row" style={{ gap: 10, justifyContent: 'center' }}>
             {/* ★ 2026-10-08（用户拍板「内置官方构建」）：HTML5 播不动（4K/HEVC 等）→ 一键改走 MPV 内核 */}
-            {allowMpv && mpvInfo?.available && kernel === 'html5' && (
+            {allowMpv && mpvUsable && kernel === 'html5' && (
               <button className="primary" onClick={() => switchKernel('mpv')}>
                 用 MPV 内核重试
               </button>
             )}
-            <button className={allowMpv && mpvInfo?.available && kernel === 'html5' ? '' : 'primary'} onClick={() => window.location.reload()}>
+            <button className={allowMpv && mpvUsable && kernel === 'html5' ? '' : 'primary'} onClick={() => window.location.reload()}>
               刷新重试
             </button>
           </div>
@@ -2805,7 +2806,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           </select>
           {/* ★ 2026-10-08（用户拍板「内置官方构建」）：MPV 高兼容内核一键切换（仅独立播放器窗口 + mpv 可用时显示；
               单击切换并记住选择；4K / HEVC / MKV 等 Chromium 播不好的形态用得上） */}
-          {allowMpv && mpvInfo?.available && (
+          {allowMpv && mpvUsable && (
             <button
               className={`vp-ctl vp-kernel${kernel === 'mpv' ? ' vp-on' : ''}`}
               title={

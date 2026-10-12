@@ -5,6 +5,7 @@ import App from './App';
 import { initTheme } from './lib/theme';
 import { dropSessionUiMemoryIfRestarted } from './lib/uiMemory';
 import { initMotionPref } from './lib/uiPrefs';
+import { initPlatform } from './lib/platform';
 import { client } from './api/client';
 import './styles/global.css';
 import './styles/netflix.css';
@@ -34,7 +35,7 @@ initTheme();
 // ★ 2026-10-08：挂载前应用「界面动效」偏好（写 <html data-motion>）——首屏就按用户档位渲染动效
 initMotionPref();
 
-void bootUiMemory().finally(() => {
+void Promise.all([bootUiMemory(), initPlatform()]).finally(() => {
   createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
       <HashRouter>

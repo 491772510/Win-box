@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- ============================================================
+	     Win-Box 主应用签名授权（Hardened Runtime）
+	     构建方按需增删；改动后必须重新签名 + 公证，否则 Gatekeeper 会拒绝。
+	     ============================================================ -->
+
+	<!-- JVM（蜘蛛宿主）需要可写可执行的内存页：JIT 编译。没有它 java 子进程会直接被 SIGKILL。 -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+
+	<!-- CPython / JVM / 部分解码器的 JIT 与自修改代码需要未签名的可执行内存。 -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!-- 允许注入 DYLD_* 环境变量：随包二进制（mpv/ffmpeg/aria2c/java/python3）定位自身 dylib 所需。 -->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+
+	<!-- 关键：允许加载「未用同一证书签名」的动态库/插件。
+	     本项目随包分发的 mpv / ffmpeg / ffprobe / aria2c / java / python3 是第三方构建，
+	     不可能用开发者证书重签其所有嵌套 dylib —— 不开这一项，启动时会被 code signing 子系统拒绝。 -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+
+	<!-- 麦克风：播放器场景用不到，显式关闭（<false/>）。
+	     ★ 不要改成 <true/> —— 置 true 会在首次使用时弹「Win-Box 想要访问麦克风」的
+	       系统授权框，是纯粹的负面体验。将来若真需要录音功能再单独打开。 -->
+	<key>com.apple.security.device.audio-input</key>
+	<false/>
+</dict>
+</plist>

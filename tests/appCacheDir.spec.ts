@@ -11,12 +11,13 @@
 //   DELETED ...\cache\spider\converted
 //   CREATED ...\cache\spider          ← 0.6s 后由本应用重建
 //   手动放入的 PROBE.txt / PROBE_DIR 在启动后一并消失，只剩 Chromium 自己的 Cache_Data。
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 
 vi.mock('electron', () => ({ app: { getPath: () => 'C:/Users/u/AppData/Roaming/win-box' } }));
 
-import { APP_CACHE_DIR_NAME, cacheDir, spiderCacheDir } from '../src/main/util/paths';
+import { APP_CACHE_DIR_NAME, cacheDir, spiderCacheDir, localImportsDir } from '../src/main/util/paths';
 import { SAFE_USERDATA_SUBDIRS } from '../src/main/util/cacheClean';
+import { setPlatformForTest, withPlatform } from '../src/shared/platform';
 
 /** Windows 大小写不敏感比较 */
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
@@ -42,5 +43,29 @@ describe('应用私有缓存目录名 — 不得与 Chromium 缓存目录重名'
     expect(spiderCacheDir().replace(/\\/g, '/')).toBe(
       `${cacheDir().replace(/\\/g, '/')}/spider`,
     );
+  });
+});
+
+// ★ 2026-10-12（macOS 适配 P0-8）：任何落盘路径都不得进 `.app` 内部。
+describe('落盘路径 — ★ 绝不写进 .app（darwin 一律挂 userData 下）', () => {
+  afterEach(() => {
+    setPlatformForTest(null);
+  });
+
+  it('★ darwin：localImportsDir() 位于 userData/imports 下', () => {
+    const dir = withPlatform('darwin', () => localImportsDir());
+    expect(dir.replace(/\\/g, '/')).toBe('C:/Users/u/AppData/Roaming/win-box/imports');
+  });
+
+  it('★ darwin：缓存目录同样挂在 userData 下（不进 .app）', () => {
+    const d = withPlatform('darwin', () => cacheDir());
+    expect(d.replace(/\\/g, '/').includes('Win-Box.app')).toBe(false);
+    expect(d.replace(/\\/g, '/').startsWith('C:/Users/u/AppData/Roaming/win-box/')).toBe(true);
+  });
+
+  it('win32：显式注入与缺省一致（缓存目录不因平台变化）', () => {
+    const def = cacheDir();
+    const win = withPlatform('win32', () => cacheDir());
+    expect(win).toBe(def);
   });
 });

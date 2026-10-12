@@ -16,7 +16,13 @@
 //   → existsSync(java.exe)=false → 「JRE 缺失」。
 //
 // 对策：不再猜单一路径，改为「候选列表 + 顺序探测」，覆盖开发/NSIS/portable 三态。
+//
+// ★ 2026-10-12（macOS 适配 P0-2）：新增 `platform` 入参（缺省 = 当前真实平台）。
+//   - win32：**逻辑原样保留**（含 `7z-out` 全部三档，注释里记的实测证据不动）；
+//   - darwin：只出 darwin 候选（`<App>/Contents/Resources/...`），**不含 `7z-out`**
+//     （那是 NSIS portable 解压布局专有，macOS 上纯属噪声）。
 import { join, dirname, normalize } from 'node:path';
+import { hasPortableLayout, platformName, type PlatformName } from '../../shared/platform';
 
 export interface ResolveCtx {
   packaged: boolean;
@@ -26,6 +32,8 @@ export interface ResolveCtx {
   exeDir?: string;
   /** 开发态：dist/ 目录（用于回退到 ../../resources） */
   dirname?: string;
+  /** ★ 缺省 = 当前真实平台（Windows 上既有单测行为不变） */
+  platform?: PlatformName;
 }
 
 /** 生成候选资源根目录（按优先级排序，去重） */
@@ -49,6 +57,25 @@ export function resourceRootCandidates(ctx: ResolveCtx): string[] {
 
   const rel = join('app.asar.unpacked', 'resources');
   const rp = ctx.resourcesPath;
+  const p = ctx.platform ?? platformName();
+
+  // ★ darwin / linux：electron-builder 的打包布局是
+  //     <App>/Contents/MacOS/<exe>       ← exeDir
+  //     <App>/Contents/Resources/...     ← process.resourcesPath
+  //   `7z-out` 是 NSIS portable 专有，这里一律不生成（见 hasPortableLayout）。
+  if (!hasPortableLayout(p)) {
+    if (rp) {
+      push(join(rp, rel));
+      push(join(rp, 'resources'));
+    }
+    if (ctx.exeDir) {
+      push(join(ctx.exeDir, '..', 'Resources', rel));
+      push(join(ctx.exeDir, '..', 'Resources', 'resources'));
+      push(join(dirname(ctx.exeDir), 'Resources', rel));
+      push(join(dirname(ctx.exeDir), 'Resources', 'resources'));
+    }
+    return out;
+  }
 
   if (rp) {
     // 1) NSIS 安装 / --dir 解包：<root>/resources/app.asar.unpacked/resources

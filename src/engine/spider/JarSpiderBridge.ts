@@ -27,6 +27,32 @@ import { buildZip, listZipEntries, looksLikeZip, readZipEntries, zipEntrySizes, 
 import { SpiderProcPool, poolEnabled, servePoolKey, WARM_METHOD, type PoolResult } from './SpiderProcPool';
 import { fixSelfSuperCallsInJarFile } from './classFix';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
+import {
+  archName,
+  isMac,
+  javaExeName,
+  joinClasspath,
+  pythonExeName,
+  spawnOptions,
+  systemToolCandidates,
+} from '../../shared/platform';
+
+interface PythonWheelVariant {
+  file: string;
+  platform: string;
+}
+
+interface PythonWheelSpec {
+  name: string;
+  pkg?: string;
+  file: string;
+  platform?: string;
+  required: boolean;
+  darwin?: {
+    arm64: PythonWheelVariant;
+    x64: PythonWheelVariant;
+  };
+}
 
 /**
  * ★ 转换产物格式版本（导出：单测与诊断用；**改变了「产物内容」就必须 +1**）。
@@ -331,9 +357,9 @@ export class JarSpiderBridge {
         // ★ 2026-09-30 蜘蛛沙箱盘：cwd 必须是沙箱盘根，否则第三方 jar 写的 `/data/…`
         //   （无盘符根路径）会按**当前盘**解析、落到系统盘根目录（见 util/jailDrive 头注释）。
         //   只给 JVM 子进程加（Python 源不经安卓路径，维持原 cwd 行为）。
-        const jailCwd = spec.exe === this.javaExePath() ? jailSpawnCwd() : '';
+        const jailCwd = this.javaExeCandidates().includes(spec.exe) ? jailSpawnCwd() : '';
         const child = spawn(spec.exe, spec.serveArgv, {
-          windowsHide: true,
+          ...spawnOptions(),
           ...(jailCwd ? { cwd: jailCwd } : {}),
           // ★ serve 进程 stdout 走行协议（池按物理行分帧），stderr 必须**消费**而不是 'ignore'：
           //   一是防 64KB 管道写满挂死蜘蛛，二是采集 SpiderLog 失败原因（空结果时上屏的人话提示）。
@@ -423,14 +449,24 @@ export class JarSpiderBridge {
     this.globalJar = (url || '').trim();
   }
 
-  /** 随包 JRE 的 java.exe 路径（**不做存在性检查**，供「是否 JVM 子进程」这类判定用；不抛异常） */
+  /**
+   * 随包 JRE 的首选 java 路径（不做存在性检查）。
+   * win32 保持 `jre/bin/java.exe`；macOS 同时兼容常规目录与 `.app`/jlink 常见 Home 布局。
+   */
   private javaExePath(): string {
-    return join(this.jvmDir, 'jre', 'bin', 'java.exe');
+    return this.javaExeCandidates()[0];
+  }
+
+  private javaExeCandidates(): string[] {
+    const regular = join(this.jvmDir, 'jre', 'bin', javaExeName());
+    if (!isMac()) return [regular];
+    return [regular, join(this.jvmDir, 'jre', 'Contents', 'Home', 'bin', javaExeName())];
   }
 
   private javaExe(): string {
-    const p = this.javaExePath();
-    if (!existsSync(p)) {
+    const candidates = this.javaExeCandidates();
+    const executable = candidates.find((candidate) => existsSync(candidate));
+    if (!executable) {
       // 附带 jvmDir 实况，便于区分「资源目录定位错」与「资源真的没打进去」
       let probe = '';
       try {
@@ -438,15 +474,28 @@ export class JarSpiderBridge {
         const parent = join(this.jvmDir, '..');
         const siblings = fs.existsSync(parent) ? fs.readdirSync(parent).slice(0, 20).join(', ') : '(不存在)';
         const jvmEntries = fs.existsSync(this.jvmDir) ? fs.readdirSync(this.jvmDir).join(', ') : '(目录不存在)';
-        probe = `\n  资源目录: ${this.jvmDir}\n  同级条目: ${siblings}\n  jvm 内: ${jvmEntries}`;
+        probe = `\n  已探测: ${candidates.join(', ')}\n  资源目录: ${this.jvmDir}\n  同级条目: ${siblings}\n  jvm 内: ${jvmEntries}`;
       } catch { /* ignore */ }
-      throw new Error(`JRE 缺失: ${p}${probe}`);
+      throw new Error(`JRE 缺失: ${candidates.join(' / ')}${probe}`);
     }
-    return p;
+    return executable;
+  }
+
+  /** 真实 JVM classpath：win32 用分号，Unix 用冒号。 */
+  private cpJoin(parts: string[]): string {
+    return joinClasspath(parts);
+  }
+
+  /**
+   * 稳定缓存键，非 classpath，分隔符必须永久保持 `;`。
+   * 这样同一批 jar 在 win32/darwin 间仍生成一致的缓存身份，勿改成平台分隔符。
+   */
+  private keyJoin(parts: string[]): string {
+    return parts.join(';');
   }
 
   private classpathJars(): string {
-    return [join(this.jvmDir, 'stubs', 'stubs.jar'), ...this.libJars()].join(';');
+    return this.cpJoin([join(this.jvmDir, 'stubs', 'stubs.jar'), ...this.libJars()]);
   }
 
   private libJars(): string[] {
@@ -711,7 +760,8 @@ export class JarSpiderBridge {
     //    ⑤ ★ 2026-09-27：**detached + 输出落文件**（见 runDex2jar 与 ConvertLock 注释）——
     //       关软件也转完；App 重启后走 2)/3) 收编或接管。
     const jdk = this.javaExe();
-    const d2jCp = this.dirJars(join(this.jvmDir, 'd2j')).join(';');
+    // 真实 classpath（进 d2j 进程 argv）→ 平台分隔符：darwin 必须用 ':'，否则整串被当成一个路径。
+    const d2jCp = this.cpJoin(this.dirJars(join(this.jvmDir, 'd2j')));
     const dexBytes = totalDexBytes(jarBytes);
     const memBytes = this.totalMemBytes;
     let heapMb = d2jHeapMb(dexBytes, memBytes);
@@ -1122,16 +1172,19 @@ export class JarSpiderBridge {
     const shimClasses = this.shimWithFoni(className, this.shellShimClassesPath() || this.autoShellShim(jarPaths));
     const shimJar = this.shellShimJarPath();
     // ★ 2026-09-29（守卫空 NPE 兜底）：已切 shell-shim 路线的 jar 预热同样不启用原生桥（见 callImpl 注释）
-    const preferShim = shimClasses !== '' && this.shimPreferred.has(jarPaths.join(';'));
+    const preferShim = shimClasses !== '' && this.shimPreferred.has(this.keyJoin(jarPaths)); // 缓存身份键：永久 ';'，见 keyJoin
     const needsNative = !preferShim && this.nativeNeeded(jarPaths);
     const nativeJars = needsNative ? (this.nativeRuntimeJars ?? []) : [];
     if (needsNative && nativeJars.length === 0) return 0;
     // ★ 与 callJar 同口径：-cp 只放运行时（stubs/libs/桥/unidbg），蜘蛛 jar/shim jar 只走加载器参数 ——
     //   否则父加载器抢占原始类，native 改写产物（子加载器最前）不生效。
-    const runtimeCp = [this.classpathJars(), ...nativeJars].join(';');
+    // 真实 classpath（进 -cp / --serve argv）→ 平台分隔符：`classpathJars()` 在 darwin 内部已用 ':'
+    // 拼好，这里若再用 ';' 与 nativeJars 拼会得到混用分隔符的串 → JVM 只认作一个路径 → 桥整体失效。
+    const runtimeCp = this.cpJoin([this.classpathJars(), ...nativeJars]);
     const cpParts = [...jarPaths];
     if (shimClasses && existsSync(shimJar)) cpParts.unshift(shimJar);
-    const loadCp = cpParts.join(';');
+    // 加载器参数同样是真实 classpath（供子加载器解析 jar）→ 平台分隔符。
+    const loadCp = this.cpJoin(cpParts);
     const serveArgv = [
       ...this.jvmPrefix(runtimeCp, true, loadCp),
       ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []),
@@ -1151,13 +1204,13 @@ export class JarSpiderBridge {
   prewarmPython(pyPath: string, clsName: string, count = 1, ext = '', siteKey = ''): number {
     if (!this.pool || !this.pyRuntimeDir) return 0;
     const dir = join(this.pyRuntimeDir, JarSpiderBridge.PY_VER);
-    const pyExe = join(dir, 'python.exe');
+    const pyExe = this.pyExePath(dir);
     const runner = join(dir, 'runner.py');
-    if (!existsSync(pyPath) || !existsSync(pyExe) || !existsSync(runner)) return 0;
+    if (!existsSync(pyPath) || !this.pyExeReady(dir) || !existsSync(runner)) return 0;
     if (!this.pyRuntimeReady()) return 0;
     this.placeRunnerFiles(dir);
     const serveArgv = [runner, '-serve', pyPath, clsName];
-    const env = { PYTHONIOENCODING: 'utf-8', ...(this.proxyProvider?.().env ?? {}),
+    const env = { PYTHONIOENCODING: 'utf-8', ...(this.proxyProvider?.().env ?? {}), ...this.pyEnvExtra(dir),
       ...(siteKey ? { WINBOX_PY_PROXY: `${LOCAL_PROXY_BASE}/proxy?do=py&key=${encodeURIComponent(siteKey)}` } : {}) };
     const key = servePoolKey(pyExe, serveArgv, env);
     return this.pool.warm(key, { exe: pyExe, serveArgv, env, key }, count, { className: clsName, method: WARM_METHOD, args: [ext] });
@@ -1175,13 +1228,67 @@ export class JarSpiderBridge {
     return this.pool?.aliveCount ?? 0;
   }
 
-  /** ★ 嵌入式 Python 运行时是否已落盘（同步判定，全源搜索就绪闸门用；**绝不触发下载**） */
+  /** 解释器可执行候选：win32 = 随包 embed 的 `python.exe`；darwin = 探测系统 `python3`。 */
+  private pyExeCandidates(dir: string): string[] {
+    if (!isMac()) return [join(dir, pythonExeName())];
+    // ★ darwin **不下载 Windows embeddable 包**（那是 .exe 的 Windows 构建）：
+    //   直接探测系统 python3 —— 固定 bin 目录（Homebrew → /usr/local/bin → /usr/bin）
+    //   **外加 PATH**（pyenv / conda / asdf 用户相当常见，不覆盖会被误判为「未安装 python3」）。
+    //   env 显式传入 process.env 才能让 PATH 进入候选；win32 下 systemToolCandidates 恒返回 []，无影响。
+    return systemToolCandidates('python3', { env: process.env as Record<string, string | undefined> });
+  }
+
+  /** 该平台实际使用的解释器路径（darwin 取首个存在者；win32 恒为随包 `python.exe`）。 */
+  private pyExePath(dir: string): string {
+    const candidates = this.pyExeCandidates(dir);
+    if (!isMac()) return candidates[0];
+    return candidates.find((c) => existsSync(c)) || candidates[0] || pythonExeName();
+  }
+
+  /** 解释器是否可用（win32：随包 `python.exe` 已落盘；darwin：探测到的系统 `python3` 存在）。 */
+  private pyExeReady(dir: string): boolean {
+    if (!isMac()) return existsSync(join(dir, pythonExeName()));
+    // 与 pyExeCandidates 同源（含 PATH）→ 「解释器在不在」与「用哪个解释器」不会口径不一致。
+    return this.pyExeCandidates(dir).some((c) => existsSync(c));
+  }
+
+  /**
+   * site-packages 目录：
+   *   win32 → `<dir>/Lib/site-packages`（随包 embed 的布局，行为与历史一致）；
+   *   darwin → `<dir>/lib/python<x.y>/site-packages`（Unix 布局）。
+   * 注：darwin 下该目录经 `PYTHONPATH` 注入解释器，目录名里的 `python<x.y>` 仅作组织用途。
+   */
+  private pySitePackages(dir: string): string {
+    if (!isMac()) return join(dir, 'Lib', 'site-packages');
+    return join(dir, 'lib', `python${JarSpiderBridge.PY_MINOR}`, 'site-packages');
+  }
+
+  /**
+   * 追加到解释器的环境变量：darwin 需要把自建 site-packages 挂上 `PYTHONPATH`
+   * （win32 由 embed 包的 `_pth` 负责，必须返回空对象以保持既有 argv/env 逐字节不变）。
+   */
+  private pyEnvExtra(dir: string): Record<string, string> {
+    if (!isMac()) return {};
+    return { PYTHONPATH: this.pySitePackages(dir) };
+  }
+
+  /** 该平台+架构下实际要下载的 wheel 变体（win32 用缺省三元组；darwin 用 `darwin.arm64/x64`）。 */
+  private wheelVariant(w: PythonWheelSpec): PythonWheelSpec {
+    if (isMac() && w.darwin) {
+      const v = archName() === 'x64' ? w.darwin.x64 : w.darwin.arm64;
+      return { name: w.name, pkg: w.pkg, file: v.file, platform: v.platform, required: w.required };
+    }
+    return w;
+  }
+
+  /** ★ Python 运行时是否已就绪（同步判定，全源搜索就绪闸门用；**绝不触发下载**） */
   pyRuntimeReady(): boolean {
     if (!this.pyRuntimeDir) return false;
     const dir = join(this.pyRuntimeDir, JarSpiderBridge.PY_VER);
-    return existsSync(join(dir, 'python.exe')) && existsSync(join(dir, 'runner.py')) &&
-      existsSync(join(dir, 'Lib', 'site-packages', '.certifi-2026.7.22')) &&
-      JarSpiderBridge.PY_WHEELS.every(w => !w.required || this.dirNonEmpty(join(dir, 'Lib', 'site-packages', w.name)));
+    const sp = this.pySitePackages(dir);
+    return this.pyExeReady(dir) && existsSync(join(dir, 'runner.py')) &&
+      existsSync(join(sp, '.certifi-2026.7.22')) &&
+      JarSpiderBridge.PY_WHEELS.every(w => !w.required || this.dirNonEmpty(join(sp, w.name)));
   }
 
   /**
@@ -1295,7 +1402,8 @@ export class JarSpiderBridge {
     tag?: string,
   ): Promise<string> {
     this.lastSpiderReason = '';
-    const fallbackKey = jarPaths.join(';') + '\n' + className;
+    // ★ 缓存身份键（非 classpath）：必须永久用 ';'，跨平台一致 → 走 keyJoin，勿改成平台分隔符。
+    const fallbackKey = this.keyJoin(jarPaths) + '\n' + className;
     const entry = className.replace(/\./g, '/') + '.class';
     const remembered = this.fallbackJars.get(fallbackKey);
     const rememberedIndex = remembered && this.jarClassIndex(remembered.path);
@@ -1316,7 +1424,8 @@ export class JarSpiderBridge {
     //   为什么可行：shell-shim 影子 DexNative 用真实实现 jar 直接回答 getLoader/getSpider，完全不依赖
     //   ARM 模拟/运行时 dex 转换（探针实测：DouDouGuard home 1.9s 拿到 10658B 数据）。
     if (isGuardInnerSpiderNull(this.lastSpiderReason)) {
-      const jarKey = jarPaths.join(';');
+      // ★ 缓存身份键（非 classpath）：必须永久用 ';'（见 keyJoin 注释），勿改成平台分隔符。
+      const jarKey = this.keyJoin(jarPaths);
       const shim = this.shellShimClassesPath() || this.autoShellShim(jarPaths);
       // 影子 jar 不在就白试（callImpl 会打「未找到 shell-shim.jar」警告）→ 直接按原失败返回
       if (shim && existsSync(this.shellShimJarPath()) && !this.shimPreferred.has(jarKey)) {
@@ -1367,7 +1476,7 @@ export class JarSpiderBridge {
     //   DexNative 来自 *.jar.patched/），shell-shim.jar 里的影子 DexNative 永远抢不到 → 「有真实实现
     //   却仍走原生解密」。跳过原生桥（不传 -Dtvbox.native.*）后加载顺序回到 [shell-shim.jar, 蜘蛛 jar]，
     //   影子生效、无需 ARM 模拟，启动更快也更稳。
-    const preferShim = shimClasses !== '' && this.shimPreferred.has(jarPaths.join(';'));
+    const preferShim = shimClasses !== '' && this.shimPreferred.has(this.keyJoin(jarPaths)); // 缓存身份键：永久 ';'，见 keyJoin
     // ★ 2026-09-26 原生桥（ARM .so）：jar 内含 .so 时按需准备 unidbg 运行时，
     //   并把桥 jar + 运行时 jar 拼进 classpath；工作/改写目录经 -Dtvbox.native.* 透传给运行器。
     //   普通源 nativeJars 为空 → classpath/argv 与历史完全一致。
@@ -1381,13 +1490,16 @@ export class JarSpiderBridge {
     //   壳源详情有剧集空）。桥的静态状态与改写类也因此分属两个加载器，桥只「复用产物」却不生效。
     //   正确分工：**-cp 只放运行时**（stubs/libs/桥/unidbg）；**蜘蛛 jar 只走加载器参数**（子加载器，
     //   顺序 = 改写产物目录 → shell-shim jar → 蜘蛛 jar）。
-    const runtimeCp = [this.classpathJars(), ...nativeJars].join(';');
+    // 真实 classpath（进 -cp / --serve argv）→ 平台分隔符：`classpathJars()` 在 darwin 内部已用 ':'
+    // 拼好，这里若再用 ';' 与 nativeJars 拼会得到混用分隔符的串 → JVM 只认作一个路径 → 桥整体失效。
+    const runtimeCp = this.cpJoin([this.classpathJars(), ...nativeJars]);
     const loadParts = [...jarPaths];
     if (shimClasses && existsSync(shimJar)) loadParts.unshift(shimJar);
     else if (shimClasses) {
       this.host?.logger.w(`jvm-bridge 已启用 shell-shim（${shimClasses}），但未找到 shell-shim.jar: ${shimJar}，影子类不会生效`);
     }
-    const loadCp = loadParts.join(';');
+    // 加载器参数同样是真实 classpath（供子加载器解析 jar）→ 平台分隔符。
+    const loadCp = this.cpJoin(loadParts);
     // ★★ 2026-10-09（孤儿端口场景修复，勿回退）★★：tag → 端口映射**只信 serve 信封自报的 `pp`**
     //   （见下方 r.proxyPort），不再在调用前预登记确定性散列端口 —— 确定性端口（19970~19999）
     //   只是「期望值」：被上一会话残留 JVM（孤儿）或同 key 并存 JVM 占用时，本 JVM 会退化临时
@@ -1471,20 +1583,22 @@ export class JarSpiderBridge {
   }
 
   /**
-   * .py 蜘蛛（嵌入式 CPython3）调用入口。
-   * spawn <pyRuntimeDir>/<PY_VER>/python.exe runner.py，argv 语义与旧 PythonRunner 对齐：
+   * .py 蜘蛛（CPython3）调用入口。
+   * spawn <解释器> runner.py，argv 语义与旧 PythonRunner 对齐：
    *   <pyPath> <className> <method> [ext] [args...]
-   * runner.py 与 python.exe 同目录（ensurePythonRuntime 落盘），首行注入 sys.path
-   * （Lib/site-packages/base），已处理 embed 包 _pth 隔离。
+   * 解释器：win32 = 随包 embed `<pyRuntimeDir>/<PY_VER>/python.exe`（runner.py 与其同目录）；
+   *         darwin = 探测到的系统 `python3`（不下载 Windows embed），依赖经 PYTHONPATH 注入。
+   * runner.py 由 ensurePythonRuntime 落盘，首行注入 sys.path（win32 Lib/site-packages/base；
+   * darwin lib/python<x.y>/site-packages 经 PYTHONPATH 注入），已处理 embed 包 _pth 隔离。
    * ★ 中文 Windows Python 默认 stdout GBK → 必须显式 PYTHONIOENCODING=utf-8。
    */
   async callPython(pyPath: string, clsName: string, method: string, args: string[], timeoutMs?: number, siteKey = ''): Promise<string> {
     // 运行时缺失/下载失败 → ensurePythonRuntime 抛错，上层（PySpider）转 PY_UNSUPPORTED 上屏
     const dir = await this.ensurePythonRuntime();
-    const pyExe = join(dir, 'python.exe');
+    const pyExe = this.pyExePath(dir);
     const runner = join(dir, 'runner.py');
     const argv = [runner, pyPath, clsName, method, ...args];
-    const pyEnv = { PYTHONIOENCODING: 'utf-8', ...(this.proxyProvider?.().env ?? {}),
+    const pyEnv = { PYTHONIOENCODING: 'utf-8', ...(this.proxyProvider?.().env ?? {}), ...this.pyEnvExtra(dir),
       ...(siteKey ? { WINBOX_PY_PROXY: `${LOCAL_PROXY_BASE}/proxy?do=py&key=${encodeURIComponent(siteKey)}` } : {}) };
     // ★ 进程池：常驻 Python（-serve）跨请求复用（服务端循环；env 带 PYTHONIOENCODING）
     //   语义同 JVM：仅传输层失败回退一次性，空结果是合法结果。
@@ -1525,6 +1639,8 @@ export class JarSpiderBridge {
 
   /** python 运行时版本目录（main 用 3.11；win7-legacy 同步时换 3.8.x —— 3.11.2+ 弃 Win7） */
   private static readonly PY_VER = '3.11.6';
+  /** PY_VER 的主次版本（3.11.6 → '3.11'），darwin 的 `lib/python<x.y>/site-packages` 用它 */
+  private static readonly PY_MINOR = JarSpiderBridge.PY_VER.split('.').slice(0, 2).join('.');
   /**
    * ★ 2026-09-26 原生桥运行期：unidbg（Windows x64 上模拟 AArch64/ARM32）+ ASM（改写字节码）。
    *
@@ -1586,27 +1702,69 @@ export class JarSpiderBridge {
    *   退化成别的平台（会解压出一堆用不了的 .pyd）。
    *   新增项一律 required:false：单库失败不影响纯 py 源，只在日志留痕。
    */
-  private static readonly PY_WHEELS: Array<{ name: string; pkg?: string; file: string; platform?: string; required: boolean }> = [
+  private static readonly PY_WHEELS: PythonWheelSpec[] = [
     { name: 'requests', file: 'requests-2.31.0-py3-none-any.whl', platform: 'py3-none-any', required: true },
     { name: 'urllib3', file: 'urllib3-1.26.18-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: true },
     { name: 'certifi', file: 'certifi-2026.7.22-py3-none-any.whl', platform: 'py3-none-any', required: true },
     { name: 'charset_normalizer', file: 'charset_normalizer-3.2.0-py3-none-any.whl', platform: 'py3-none-any', required: true },
     { name: 'idna', file: 'idna-3.4-py3-none-any.whl', platform: 'py3-none-any', required: true },
-    { name: 'lxml', file: 'lxml-4.9.2-cp311-cp311-win_amd64.whl', platform: 'cp311-cp311-win_amd64', required: false },
+    // ★ darwin：4.9.2 无 cp311 arm64；改用 5.2.1 的 universal2（arm64/x86_64 通用），win32 分支不变。
+    {
+      name: 'lxml', file: 'lxml-4.9.2-cp311-cp311-win_amd64.whl', platform: 'cp311-cp311-win_amd64', required: false,
+      darwin: {
+        arm64: { file: 'lxml-5.2.1-cp311-cp311-macosx_10_9_universal2.whl', platform: 'cp311-cp311-macosx_10_9_universal2' },
+        x64: { file: 'lxml-5.2.1-cp311-cp311-macosx_10_9_universal2.whl', platform: 'cp311-cp311-macosx_10_9_universal2' },
+      },
+    },
     // ---- ★ 2026-09-30 新增（实测缺得最多的几族）----
-    { name: 'Crypto', pkg: 'pycryptodome', file: 'pycryptodome-3.19.1-cp35-abi3-win_amd64.whl', platform: 'cp35-abi3-win_amd64', required: false },
+    // ★ darwin：pycryptodome 3.19.1 的 mac wheel 为 cp35-abi3 universal2（arm64/x86_64 通用）。
+    {
+      name: 'Crypto', pkg: 'pycryptodome', file: 'pycryptodome-3.19.1-cp35-abi3-win_amd64.whl', platform: 'cp35-abi3-win_amd64', required: false,
+      darwin: {
+        arm64: { file: 'pycryptodome-3.19.1-cp35-abi3-macosx_10_9_universal2.whl', platform: 'cp35-abi3-macosx_10_9_universal2' },
+        x64: { file: 'pycryptodome-3.19.1-cp35-abi3-macosx_10_9_universal2.whl', platform: 'cp35-abi3-macosx_10_9_universal2' },
+      },
+    },
     { name: 'bs4', pkg: 'beautifulsoup4', file: 'beautifulsoup4-4.12.3-py3-none-any.whl', platform: 'py3-none-any', required: false },
     { name: 'soupsieve', file: 'soupsieve-2.5-py3-none-any.whl', platform: 'py3-none-any', required: false },
     { name: 'pyquery', file: 'pyquery-2.0.0-py3-none-any.whl', platform: 'py3-none-any', required: false },
     { name: 'cssselect', file: 'cssselect-1.2.0-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: false },
-    { name: 'PIL', pkg: 'Pillow', file: 'pillow-10.2.0-cp311-cp311-win_amd64.whl', platform: 'cp311-cp311-win_amd64', required: false },
-    { name: 'cryptography', file: 'cryptography-41.0.7-cp37-abi3-win_amd64.whl', platform: 'cp37-abi3-win_amd64', required: false },
+    // ★ darwin：Pillow 10.2.0 有 cp311 的 macosx arm64 与 x86_64 专用 wheel（非 universal2，须按架构二选一）。
+    {
+      name: 'PIL', pkg: 'Pillow', file: 'pillow-10.2.0-cp311-cp311-win_amd64.whl', platform: 'cp311-cp311-win_amd64', required: false,
+      darwin: {
+        arm64: { file: 'pillow-10.2.0-cp311-cp311-macosx_11_0_arm64.whl', platform: 'cp311-cp311-macosx_11_0_arm64' },
+        x64: { file: 'pillow-10.2.0-cp311-cp311-macosx_10_10_x86_64.whl', platform: 'cp311-cp311-macosx_10_10_x86_64' },
+      },
+    },
+    // ★ darwin：cryptography 41.0.7 的 mac wheel 为 cp37-abi3 universal2（arm64/x86_64 通用）。
+    {
+      name: 'cryptography', file: 'cryptography-41.0.7-cp37-abi3-win_amd64.whl', platform: 'cp37-abi3-win_amd64', required: false,
+      darwin: {
+        arm64: { file: 'cryptography-41.0.7-cp37-abi3-macosx_10_12_universal2.whl', platform: 'cp37-abi3-macosx_10_12_universal2' },
+        x64: { file: 'cryptography-41.0.7-cp37-abi3-macosx_10_12_universal2.whl', platform: 'cp37-abi3-macosx_10_12_universal2' },
+      },
+    },
     { name: 'chardet', file: 'chardet-5.2.0-py3-none-any.whl', platform: 'py3-none-any', required: false },
     { name: 'cloudscraper', file: 'cloudscraper-1.2.71-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: false },
     { name: 'requests_toolbelt', pkg: 'requests-toolbelt', file: 'requests_toolbelt-1.0.0-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: false },
     { name: 'pyparsing', file: 'pyparsing-3.1.1-py3-none-any.whl', platform: 'py3-none-any', required: false },
-    { name: 'curl_cffi', file: 'curl_cffi-0.7.4-cp38-abi3-win_amd64.whl', platform: 'cp38-abi3-win_amd64', required: false },
-    { name: 'cffi', file: 'cffi-1.16.0-cp311-cp311-win_amd64.whl', platform: 'cp311-cp311-win_amd64', required: false },
+    // ★ darwin：curl_cffi 0.7.4 有 cp38-abi3 的 macosx arm64 / x86_64 专用 wheel。
+    {
+      name: 'curl_cffi', file: 'curl_cffi-0.7.4-cp38-abi3-win_amd64.whl', platform: 'cp38-abi3-win_amd64', required: false,
+      darwin: {
+        arm64: { file: 'curl_cffi-0.7.4-cp38-abi3-macosx_11_0_arm64.whl', platform: 'cp38-abi3-macosx_11_0_arm64' },
+        x64: { file: 'curl_cffi-0.7.4-cp38-abi3-macosx_10_9_x86_64.whl', platform: 'cp38-abi3-macosx_10_9_x86_64' },
+      },
+    },
+    // ★ darwin：cffi 1.16.0 有 cp311 的 macosx arm64 / x86_64 专用 wheel。
+    {
+      name: 'cffi', file: 'cffi-1.16.0-cp311-cp311-win_amd64.whl', platform: 'cp311-cp311-win_amd64', required: false,
+      darwin: {
+        arm64: { file: 'cffi-1.16.0-cp311-cp311-macosx_11_0_arm64.whl', platform: 'cp311-cp311-macosx_11_0_arm64' },
+        x64: { file: 'cffi-1.16.0-cp311-cp311-macosx_10_9_x86_64.whl', platform: 'cp311-cp311-macosx_10_9_x86_64' },
+      },
+    },
     { name: 'pycparser', file: 'pycparser-2.21-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: false },
   ];
   /** PyPI simple 镜像根（回退到带 `simple/` 的路径，由其索引解析 wheel 真实地址） */
@@ -1629,7 +1787,7 @@ export class JarSpiderBridge {
     // ★ 在途任务共享：预热与调用并发时不再下载两份运行时
     if (this.pyRuntimeTask) {
       const d = await this.pyRuntimeTask;
-      if (d && existsSync(join(d, 'python.exe'))) return d;
+      if (d && this.pyExeReady(d)) return d;
     }
     const task = this.preparePythonRuntime();
     this.pyRuntimeTask = task
@@ -1641,6 +1799,9 @@ export class JarSpiderBridge {
   private async preparePythonRuntime(): Promise<string> {
     if (!this.pyRuntimeDir) throw new Error('python 源需要嵌入式 Python 运行时，但未配置下载目录');
     const dir = join(this.pyRuntimeDir, JarSpiderBridge.PY_VER);
+    // ★★ darwin：**不下载 Windows embeddable 包**（11MB 级、且是 .exe 的 Windows 构建）。
+    //   改为探测系统 python3（brew install python@3.11 / Xcode CLT / python.org），只装依赖 + 落 runner。
+    if (isMac()) return this.preparePythonRuntimeMac(dir);
     const pyExe = join(dir, 'python.exe');
     if (existsSync(pyExe)) {
       // 运行时已就绪但第三方库/runner 可能缺失 → 幂等补齐（首次下载中断后重试自愈）
@@ -1672,6 +1833,28 @@ export class JarSpiderBridge {
       `可手动下载 python-${JarSpiderBridge.PY_VER}-embed-amd64.zip 解压到 ${dir}，` +
       `并把 lxml/requests/urllib3 的 wheel 解压进 ${join(dir, 'Lib', 'site-packages')} 后重试`,
     );
+  }
+
+  /**
+   * ★ darwin 的 python 运行时准备：**不下载 Windows embeddable 包**，改为探测系统 python3。
+   * 只做三件事：① 校验系统 python3 存在（缺失 → 抛中文人话错误，上层 PySpider 转 PY_UNSUPPORTED）；
+   * ② 幂等装依赖（纯 py wheel 必装；darwin 二进制 wheel 按架构尽力装，失败仅告警）；
+   * ③ 落盘 runner.py / base。解释器由 PYTHONPATH 注入自建 site-packages，无需改随包 runner。
+   */
+  private async preparePythonRuntimeMac(dir: string): Promise<string> {
+    const logger = this.host?.logger;
+    // 探测系统 python3（与 pyExeReady 同源），缺失时给出可执行的中文修复指引。
+    if (!this.pyExeCandidates(dir).some((c) => existsSync(c))) {
+      throw new Error(
+        'python 源需要 Python 3 运行时，但本机未检测到 python3。' +
+        '请执行 brew install python@3.11（或安装 Xcode 命令行工具 / 从 python.org 安装 Python 3）后重试。',
+      );
+    }
+    mkdirSync(dir, { recursive: true });
+    await this.ensureRuntimeLibs(dir);
+    this.placeRunnerFiles(dir);
+    logger?.i?.(`python: 使用系统 python3（${this.pyExePath(dir)}），依赖安装到 ${this.pySitePackages(dir)}`);
+    return dir;
   }
 
   /**
@@ -1805,7 +1988,7 @@ export class JarSpiderBridge {
    *  ★ 2026-09-24：**分波并行**（每波 3 个）—— wheel 之间互不依赖，此前 6 个串行
    *  （每包「索引页 + 包体」两次往返）是首次加载时间的大头之一。 */
   private async ensureRuntimeLibs(dir: string): Promise<void> {
-    const sp = join(dir, 'Lib', 'site-packages');
+    const sp = this.pySitePackages(dir);
     const pending = JarSpiderBridge.PY_WHEELS.filter((w) => !this.dirNonEmpty(join(sp, w.name)) ||
       (w.name === 'certifi' && !existsSync(join(sp, '.certifi-2026.7.22'))));
     const WAVE = 3;
@@ -1813,7 +1996,7 @@ export class JarSpiderBridge {
       await Promise.all(
         pending.slice(i, i + WAVE).map(async (w) => {
           const pkgDir = join(sp, w.name);
-          const ok = await this.downloadWheel(dir, w).catch((e) => {
+          const ok = await this.downloadWheel(dir, this.wheelVariant(w)).catch((e) => {
             if (w.required) throw e;
             this.host?.logger?.w?.(`python: 可选依赖 ${w.name} 下载失败（不影响纯 py 源）: ${(e as Error).message}`);
             return false;
@@ -1845,7 +2028,7 @@ export class JarSpiderBridge {
    *   只接受**同平台标签**的 wheel（`platform`）—— 否则二进制包会退化成别的平台（解压出用不了的 .pyd）。
    */
   private async downloadWheel(dir: string, w: { name: string; pkg?: string; file: string; platform?: string }): Promise<boolean> {
-    const sp = join(dir, 'Lib', 'site-packages');
+    const sp = this.pySitePackages(dir);
     mkdirSync(sp, { recursive: true });
     const fs = require('node:fs') as typeof import('node:fs');
     const pushEntries = (buf: Buffer): void => {
@@ -1998,7 +2181,8 @@ export class JarSpiderBridge {
       //   壳 native 解密出来的裸 dex 转成 jar 再加载 —— 这里把 dex2jar 工具链与缓存目录透传给子进程。
       //   缺任一项 → stub 退回「可解释失败」（不静默）。
       `-Dtvbox.d2j.java=${this.javaExe()}`,
-      `-Dtvbox.d2j.cp=${this.dirJars(join(this.jvmDir, 'd2j')).join(';')}`,
+      // 透传给子 JVM 的 dex2jar classpath：真实 classpath → 平台分隔符。
+      `-Dtvbox.d2j.cp=${this.cpJoin(this.dirJars(join(this.jvmDir, 'd2j')))}`,
       `-Dtvbox.d2j.cache=${join(this.cacheDir, 'runtime-dex')}`,
       // ★ 2026-09-30 蜘蛛沙箱盘：让 Java 侧看到的「当前目录」= subst 虚拟盘根 →
       //    spider 打印/存储的 `/data/…` 路径串与真实落点一致（真正决定落点的是 spawn 的 cwd）。
@@ -2032,7 +2216,9 @@ export class JarSpiderBridge {
       // ★ 2026-09-30 蜘蛛沙箱盘：cwd = subst 虚拟盘根（见 util/jailDrive 头注释）——
       //   这是第三方 jar 写 `/data/…` 时真实落点的决定项；未建立映射时为空串（不传 cwd，行为同历史）。
       //   只给 JVM 子进程加（Python 源不经安卓路径，维持原 cwd 行为）。
-      const jailCwd = exe === this.javaExePath() ? jailSpawnCwd() : '';
+      //   ★ 用候选集判定（而非单个 javaExePath()）：macOS 上真实 java 可能是
+      //     `jre/Contents/Home/bin/java`（第二种布局），仍须拿到沙箱盘 cwd。
+      const jailCwd = this.javaExeCandidates().includes(exe) ? jailSpawnCwd() : '';
       const child = spawn(exe, argv, {
         windowsHide: true,
         timeout: timeoutMs ?? this.callTimeoutMs,

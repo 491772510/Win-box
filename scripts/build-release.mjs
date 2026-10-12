@@ -6,6 +6,23 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+// ★ 2026-10-12（macOS 适配 · T04）：目标平台开关。
+//   --mac  → electron-builder `--mac dmg zip`（产出 arm64 + x64 的 dmg 与 zip）
+//   --win  → 与原脚本完全一致的 `--win nsis`
+//   无参数  → 默认 Windows（★ 零回归红线：默认分支的行为一字不改）
+const argv = process.argv.slice(2).filter(a => a !== '--');
+const unknown = argv.filter(a => a !== '--mac' && a !== '--win' && a !== '--dry-run');
+if (unknown.length) {
+  console.error(`Unknown argument(s): ${unknown.join(' ')}`);
+  console.error('Usage: node scripts/build-release.mjs [--win | --mac] [--dry-run]');
+  process.exit(1);
+}
+const target = argv.includes('--mac') ? 'mac' : 'win';
+const dryRun = argv.includes('--dry-run');
+const builderArgs = target === 'mac'
+  ? ['--mac', 'dmg', 'zip', '--publish', 'never']
+  : ['--win', 'nsis', '--publish', 'never'];
 const image = process.env.WINBOX_SUPPORT_IMAGE
   ? resolve(root, process.env.WINBOX_SUPPORT_IMAGE)
   : ['src/renderer/assets/author-support.png', '.tmp/private-assets/author-support.png']
@@ -34,4 +51,22 @@ const packagedGroupImage = readdirSync(assets).find(name => /\.(png|jpe?g)$/i.te
 if (!packagedGroupImage) throw new Error('Built renderer does not contain the original group QR image. Packaging stopped.');
 console.log(`Support artwork verified: ${packagedImage} / SHA256 ${original}`);
 console.log(`Group QR artwork verified: ${packagedGroupImage} / SHA256 ${groupOriginal}`);
-run(['node_modules/electron-builder/out/cli/cli.js', '--win', 'nsis', '--publish', 'never']);
+
+// macOS 前置检查：electron-builder 需要 build/icon.icns（icns 不入库，需先在 Mac 上生成）。
+// 只影响 --mac 分支；Windows 分支不读这个文件，行为不变。
+if (target === 'mac') {
+  const icns = join(root, 'build/icon.icns');
+  if (!existsSync(icns)) {
+    console.error('Missing build/icon.icns — 先在 macOS 上执行：`node scripts/make-icon.mjs`（用系统自带 sips + iconutil 从 build/icon.png 生成）。');
+    process.exit(1);
+  }
+  console.log(`macOS icon verified: ${icns}`);
+}
+
+const builderCmd = ['node_modules/electron-builder/out/cli/cli.js', ...builderArgs];
+console.log(`electron-builder args: ${builderArgs.join(' ')}`);
+if (dryRun) {
+  console.log('Dry run: 不执行打包，仅打印将要执行的命令与前置校验结果。');
+  process.exit(0);
+}
+run(builderCmd);

@@ -23,8 +23,20 @@ import { DavStore } from './store/DavStore';
 import { JsonStore } from './store/JsonStore';
 import { LocalPkgStore } from './store/LocalPkgStore';
 import { LOCAL_PROXY_BASE } from '../shared/constants';
+import { IPC } from '../shared/ipc-channels';
 import { localImportsDir, userDataDir } from './util/paths';
 import { safeStorageDriveCodec } from './util/driveCodec';
+import { installApplicationMenu } from './menu';
+import {
+  exeName,
+  isMac,
+  javaExeName,
+  platformName,
+  pythonExeName,
+  shouldQuitOnLastWindowClosed,
+  shouldStopProxyOnLastWindowClosed,
+  type ToolId,
+} from '../shared/platform';
 
 // esbuild 打成 CJS：__dirname 由 Node 提供（= dist/）。资源在 dist/../../resources。
 declare const __dirname: string;
@@ -194,20 +206,93 @@ app.whenReady().then(async () => {
 
   // 启动即记录资源根定位结果：打包后（尤其 portable 的 7z-out 解压布局）
   // 若再出现「JRE 缺失」，日志首行就能看出真实路径命中情况。
+  //
+  // ★ 2026-10-12（macOS 适配 P0-3）：不再硬编码 `jvm/jre/bin/java.exe` ——
+  //   darwin 上没有 `.exe`，且 JRE 可能是 `Contents/Home/bin/java` 布局；
+  //   统一走 `javaCandidates()`（返回第一个存在的候选）。Windows 分支结果逐字节不变。
+  let resourcesRoot = '';
   try {
-    const { resourcesDir, resourcesDirDebug } = await import('./util/paths');
+    const { resourcesDir, resourcesDirDebug, javaCandidates } = await import('./util/paths');
     const dir = resourcesDir();
-    const ok = existsSync(join(dir, 'jvm', 'jre', 'bin', 'java.exe'));
-    fileLogger.i(`资源根: ${dir} | java.exe: ${ok ? 'OK' : '缺失'}`);
+    resourcesRoot = dir;
+    const ok = javaCandidates(dir).some((p) => existsSync(p));
+    fileLogger.i(`资源根: ${dir} | ${javaExeName()}: ${ok ? 'OK' : '缺失'}`);
     if (!ok) fileLogger.w('资源候选路径探测:\n' + resourcesDirDebug());
   } catch (e) {
     fileLogger.w('资源根探测失败: ' + (e instanceof Error ? e.message : String(e)));
   }
 
+  // ★ 2026-10-12（macOS 适配 G4「依赖可观测」）：启动依赖探测总览 —— 一行一个依赖。
+  //   探测链：用户覆盖 → 随包内置 → 本机探测（Homebrew / /usr/local/bin / PATH / *.app）。
+  //   缺失时给「人话」修复指引（darwin 必含 `brew install <x>`），不再只留一句「缺失」。
+  //   ★ 日志级别按平台区分：darwin 缺依赖是**真故障**（仓库不随包二进制）→ warn；
+  //     win32 依赖以随包内置为主、本机探测本就返回空（Program Files 系逻辑在调用方）
+  //     → 降为 info，避免 Windows 启动日志被无意义的 warn 刷屏（零行为变化）。
+  try {
+    const { probeTools } = await import('./util/toolProbe');
+    const p = platformName();
+    const missingIsWarn = isMac(p);
+    const deps: Array<{ tool: ToolId; bundled: string }> = [
+      { tool: 'mpv', bundled: join(resourcesRoot, 'mpv', exeName('mpv', p)) },
+      { tool: 'ffmpeg', bundled: join(resourcesRoot, 'ffmpeg', exeName('ffmpeg', p)) },
+      { tool: 'ffprobe', bundled: join(resourcesRoot, 'ffmpeg', exeName('ffprobe', p)) },
+      { tool: 'aria2c', bundled: join(resourcesRoot, 'aria2', exeName('aria2c', p)) },
+      { tool: 'java', bundled: join(resourcesRoot, 'jvm', 'jre', 'bin', javaExeName(p)) },
+      { tool: 'python3', bundled: join(resourcesRoot, 'python', pythonExeName(p)) },
+    ];
+    const found = probeTools(deps, (c: string) => existsSync(c));
+    for (const d of deps) {
+      const r = found[d.tool];
+      if (r && r.source !== 'none') {
+        fileLogger.i(`依赖: ${d.tool}=${r.source} ${r.path}`);
+      } else {
+        const msg = `依赖: ${d.tool}=none（${r ? r.hint : ''}）`;
+        if (missingIsWarn) fileLogger.w(msg);
+        else fileLogger.i(msg);
+      }
+    }
+  } catch (e) {
+    fileLogger.w('依赖探测失败: ' + (e instanceof Error ? e.message : String(e)));
+  }
+
   // ★ 2026-10-09：构建标记 —— 日志排障第一行就能确认「跑的是哪只构建」。
   //   背景：同版本号覆盖安装时用户日志无法区分新旧产物（1.20.0 两轮都叫 1.20.0），
   //   此标记随每轮 main 改动手工递增（含当轮关键词，grep 即证）。
-    fileLogger.i('build: 20261010.5 release-1.20.4 (exact episodes / drive streams / video resolution / Jar cookie retry / author support / first-run about)');
+    fileLogger.i('build: 20261012.1 release-1.20.10 (macOS T02: platform layer / dataDir no-relocate / darwin lifecycle / app menu / dep probe)');
+
+  // ★ 2026-10-12（macOS 适配 P1-1）：安装 macOS 应用菜单（App / 编辑 / 窗口 / 帮助）。
+  //   **非 darwin 内部直接 no-op** —— Windows 完全无感（全应用零菜单的现状保持不变）。
+  //   Cmd+Q 退出 / Cmd+W 关窗 / Cmd+, 跳配置页 都靠它。
+  try {
+    installApplicationMenu({
+      /**
+       * 「设置…」（Cmd+,）：
+       *   ① macOS 上窗口可能已被用户 Cmd+W 关掉（应用仍常驻 Dock）→ 先确保**主窗口**存在；
+       *   ② 只向**主窗口**发 UI_GOTO_SETTINGS 让它跳配置页（渲染层订阅与否都无害）；
+       *   ③ 无论渲染层是否订阅，都把主窗口**前置可见** —— 否则用户按 Cmd+, 什么都不会发生。
+       *
+       * ★★ 目标恒为 `mainWindow`（**不是**「第一个窗口」）：macOS 关主窗不退出，若此时只剩
+       *   播放器窗 / 详情 / 搜索子窗，用「第一个非销毁窗口」会跳过 `createWindow()`、把焦点
+       *   给到一个**没有 `/config` 路由**的子窗 → Cmd+, 看着像没反应。故这里显式锚定主窗口。
+       */
+      onPreferences: () => {
+        if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+        const w = mainWindow;
+        if (w && !w.isDestroyed()) {
+          try {
+            w.webContents.send(IPC.UI_GOTO_SETTINGS);
+          } catch {
+            /* 窗口已关：忽略 */
+          }
+          if (w.isMinimized()) w.restore();
+          w.show();
+          w.focus();
+        }
+      },
+    });
+  } catch {
+    /* 菜单安装失败不影响启动 */
+  }
 
   try {
     await proxy.start();
@@ -259,13 +344,32 @@ app.whenReady().then(async () => {
   try { host.syncDriveFiles(); } catch { /* 同步失败不影响启动 */ }
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    // ★ 2026-10-12（macOS 适配 P0-10 / P1-3）：Dock 图标点击（以及 Cmd+Tab 切回）时
+    //   必须能**重建主窗口** —— macOS 关窗不退出，应用常驻 Dock；没有窗口又建不出来
+    //   就变成了「点了 Dock 图标什么都没有」。老板键隐藏态（`mainWindow` 仍非 null、
+    //   窗口也未关闭）不受影响。
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+      return;
+    }
+    const first = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && w.isVisible());
+    if (first) {
+      if (first.isMinimized()) first.restore();
+      first.focus();
+    }
   });
 });
 
 app.on('window-all-closed', () => {
+  // ★ 2026-10-12（macOS 适配 P0-10）★★：
+  //   改前 `proxy.stop()` 对**所有平台**都执行，再 `if (process.platform !== 'darwin') app.quit()`。
+  //   → macOS 上关掉最后一个窗口后代理被停掉、但应用按 macOS 惯例仍常驻 Dock，
+  //     「点 Dock 重开窗口接着播」直接播不了（本地中继已死），只能 Cmd+Q 重启。
+  //   darwin：直接 return —— **既不 quit 也不 stop 代理**（真正的清理统一放 `will-quit`）。
+  //   非 darwin：逻辑一字不变（stop + quit）。
+  if (!shouldStopProxyOnLastWindowClosed()) return;
   proxy.stop();
-  if (process.platform !== 'darwin') app.quit();
+  if (shouldQuitOnLastWindowClosed()) app.quit();
 });
 
 // ★ 退出前彻底清理：terminate 所有 JVM 蜘蛛子进程 + 停本地代理 + 断 token 解码，

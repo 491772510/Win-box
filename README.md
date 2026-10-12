@@ -37,10 +37,27 @@ pnpm run build            # 构建（主进程 + 渲染层）
 
 运行时依赖（**不入库**，按需自行准备）：JDK / JRE、`stubs.jar` 桥、嵌入式 CPython、shell-shim、unidbg 运行时等。
 
+## macOS 版本
+
+macOS 适配已合入主分支，与 Windows 共用同一份源码与同一个 Release（tag = `release<版本号>`）。
+
+- **打包只能在 Mac 上做**：`pnpm icon:mac`（生成 `build/icon.icns`）→ `pnpm dist:mac`（产出 arm64 + x64 的 dmg 与 zip）。
+- 依赖二进制（mpv / ffmpeg / ffprobe / aria2c / java / python3）**不入库**，需自备（`brew install` 或下载后放进 `resources/`）。
+- 签名 / 公证 / 无开发者账号时的放行办法，全部见 **[`docs/macos-build.md`](docs/macos-build.md)**。
+- macOS 上更新器会下载并打开 `.dmg`，提示手动拖入「应用程序」覆盖安装（未接入 Sparkle，不做静默替换）。
+
 ## 发布附件
 
 当前更新器下载完整安装包，不使用 `.blockmap`；NSIS 配置已关闭差分包生成。
-发布时仅上传当前版本的 `.exe` 安装包，不上传 `.blockmap` 或构建元数据，也不要使用整个输出目录的通配符上传。
+发布时仅上传当前版本的 `.exe` / `.dmg` 安装包，不上传 `.blockmap` 或构建元数据，也不要使用整个输出目录的通配符上传。
+
+**资产命名必须严格一致**，否则更新器挑不到对应平台的安装包：
+
+| 平台 | 文件名 |
+| --- | --- |
+| Windows | `Win-Box Setup <版本>.exe`（或 portable 的 `Win-Box <版本>.exe`） |
+| macOS Apple Silicon | `Win-Box-<版本>-arm64.dmg` |
+| macOS Intel | `Win-Box-<版本>-x64.dmg` |
 
 ```bash
 pnpm run release:upload -- --dry-run  # 预览当前版本的上传文件，不执行上传

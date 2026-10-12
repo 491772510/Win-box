@@ -6,6 +6,7 @@ import { app, BrowserWindow, screen, shell } from 'electron';
 import { join } from 'node:path';
 import { applyWindowCorner } from '../util/windowCorner';
 import { applyEpisodeSwitch, type PlayerEpisodeSwitch } from '../../shared/playerEpisode';
+import { isMac } from '../../shared/platform';
 
 // 与渲染层 PlayerPage 约定的初始播放数据（可序列化）
 export interface PlayerInit {
@@ -129,8 +130,15 @@ let fullscreenActive = false;
  * The native `leave-full-screen` event is the source of truth here: transparent
  * windows may report `isFullScreen() === false` even while the native transition
  * is active, so checking only that method can leave the window at fullscreen bounds.
+ *
+ * ★ 2026-10-12（macOS 适配 §3.13）：**darwin 直接 no-op** —— macOS 原生全屏由系统用
+ *   Space/SpaceBar 管理窗口尺寸（`setSimpleFullScreen` 之外的路径），Electron 会在退出
+ *   全屏时把窗口放回进入前的 frame；再手动 `setBounds()` 反而会把窗口挪到错误位置。
+ *   ⇒ Windows 的透明窗补偿逻辑原样保留，只在非 win32 时跳过这一层。
  */
 function restoreFullscreenBounds(w: BrowserWindow): void {
+  // darwin：系统自己恢复边界，绝不能手动写回（需真机验证，见下方 playerSetFullscreen 注释）
+  if (isMac()) return;
   const bounds = fullscreenBounds;
   if (!bounds || w.isDestroyed() || fullscreenActive) return;
   if (w.isMaximized()) w.unmaximize();
@@ -152,6 +160,47 @@ export function playerSetFullscreen(fullscreen: boolean): Promise<boolean> {
   fullscreenRequest = fullscreenRequest.then(async () => {
     const current = playerWin;
     if (!current || current.isDestroyed() || mini) return false;
+    /**
+     * ★★ 2026-10-12（macOS 适配 §3.13）：darwin 走**原生全屏**分支 ★★
+     *
+     * Windows 那套补偿（透明窗 `isFullScreen()` 不可靠 → `fullscreenActive` 旗标 +
+     * `setResizable(false)` + 手动 `setBounds()` + 1500ms 超时兜底）在 macOS 上**必须跳过**：
+     *   · macOS 全屏是「切 Space」的动画，`setResizable(false)` 会卡住动画、留下不可缩放窗口；
+     *   · 退出全屏时系统会把窗口恢复成进入前的 frame，手动 `setBounds()` 会打架。
+     * 这里只做两件事：等原生 `enter/leave-full-screen` 事件（超时兜底），返回**真实**状态。
+     *
+     * ⚠️ 需真机验证（Windows 上无法伪验证）：
+     *   ① 进/退原生全屏后窗口边界是否回到进入前的位置（多显示器 / 非主屏尤其要看）；
+     *   ② 全屏态下控制条（HTML 覆盖层）可见性与自动隐藏是否正常；
+     *   ③ mpv 视口同步 —— `MpvController.updateViewport()` 用
+     *      `playerIsFullscreen() ? 0 : …` 算 `video-margin-ratio-top`，全屏时应为 0；
+     *      需确认 `enter/leave-full-screen` 事件在 darwin 上的触发时机与该计算一致
+     *      （事件由下方 openPlayerWindow 的监听器置 `fullscreenActive`）。
+     */
+    if (isMac()) {
+      const alreadyNative = fullscreenActive || current.isFullScreen();
+      if (alreadyNative === wanted) return wanted ? alreadyNative : false;
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          // 两个事件都摘掉（未注册的那个 removeListener 是无害的）
+          current.removeListener('enter-full-screen', finish);
+          current.removeListener('leave-full-screen', finish);
+          resolve();
+        };
+        // 与 win32 同口径的超时兜底（事件万一不来，也不能让 Promise 悬着）
+        const timer = setTimeout(finish, 1500);
+        if (wanted) current.once('enter-full-screen', finish);
+        else current.once('leave-full-screen', finish);
+        current.setFullScreen(wanted);
+      });
+      if (current.isDestroyed()) return false;
+      // macOS 上 `leave-full-screen` 后 `isFullScreen()` 可能仍是 true（动画未结束）→ 以退出为准。
+      return wanted ? fullscreenActive || current.isFullScreen() : false;
+    }
     const alreadyFullscreen = fullscreenActive || current.isFullScreen();
     if (alreadyFullscreen === wanted) {
       // Transparent Windows windows can report false after the native leave
@@ -293,7 +342,8 @@ export function openPlayerWindow(init: PlayerInit): void {
   playerWin.on('enter-full-screen', () => {
     if (playerWin && !playerWin.isDestroyed()) {
       fullscreenActive = true;
-      playerWin.setResizable(false);
+      // ★ darwin：不动 resizable（会卡住 Space 动画并留下不可缩放窗口）；win32 原样。
+      if (!isMac()) playerWin.setResizable(false);
       playerWin.webContents.invalidate();
       playerWin.webContents.send('player:fullscreen', true);
     }
@@ -303,8 +353,9 @@ export function openPlayerWindow(init: PlayerInit): void {
       fullscreenActive = false;
       // Restore here, after the native leave event, rather than relying on
       // BrowserWindow.isFullScreen(), which is unreliable for transparent windows.
+      // （darwin 下 restoreFullscreenBounds 是 no-op：系统自己恢复边界）
       restoreFullscreenBounds(playerWin);
-      playerWin.setResizable(true);
+      if (!isMac()) playerWin.setResizable(true);
       playerWin.webContents.invalidate();
       playerWin.webContents.send('player:fullscreen', false);
     }

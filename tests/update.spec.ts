@@ -12,9 +12,11 @@ import {
   normalizeVersion,
   parseLatestRelease,
   parseVersion,
+  pickInstallerAsset,
   pickSetupAsset,
   rankBySpeed,
   sampleBps,
+  type ReleaseAssetInput,
   type SpeedSample,
 } from '../src/shared/update';
 
@@ -160,6 +162,83 @@ describe('pickSetupAsset', () => {
     expect(pickSetupAsset(onlyPortable)?.name).toBe('Win-Box.1.13.0.exe');
     expect(pickSetupAsset([{ name: 'src.zip', browser_download_url: 'u', size: 1 }])).toBeNull();
     expect(pickSetupAsset([])).toBeNull();
+  });
+});
+
+describe('★ 2026-10-12 pickInstallerAsset · darwin（原实现只认 .exe → darwin 恒 null，本次修复）', () => {
+  const a = (name: string): ReleaseAssetInput => ({ name, browser_download_url: `https://g/${name}`, size: 100 });
+  // 故意把 x64 排在 arm64 前面：验证「按 arch 挑」而不是「取第一个」
+  const both = [a('Win-Box-1.20.10-x64.dmg'), a('Win-Box-1.20.10-arm64.dmg'), a('Win-Box-1.20.10-x64.zip'), a('Win-Box-1.20.10-arm64.zip')];
+
+  it('arm64 → 优先 -arm64.dmg（原实现在此恒返回 null）', () => {
+    expect(pickInstallerAsset(both, { platform: 'darwin', arch: 'arm64' })?.name).toBe('Win-Box-1.20.10-arm64.dmg');
+  });
+
+  it('x64 → 优先 -x64.dmg', () => {
+    expect(pickInstallerAsset(both, { platform: 'darwin', arch: 'x64' })?.name).toBe('Win-Box-1.20.10-x64.dmg');
+  });
+
+  it('arch 缺省（= 当前架构 archTag()）仍能挑出 dmg，不再恒 null', () => {
+    expect(pickInstallerAsset(both, { platform: 'darwin' })?.name).toMatch(/\.dmg$/);
+  });
+
+  it('① 无对应架构的 dmg → ② 回退到含版本号的 dmg', () => {
+    const list = [a('Win-Box-1.19.0.dmg'), a('Win-Box-1.20.10.dmg')];
+    expect(pickInstallerAsset(list, { platform: 'darwin', arch: 'arm64', version: 'release1.20.10' })?.name).toBe('Win-Box-1.20.10.dmg');
+  });
+
+  it('② 版本号也对不上 → ③ 任意 .dmg（按 Release 里的原始顺序取第一条）', () => {
+    const list = [a('Win-Box-0.0.1.dmg'), a('Win-Box-9.9.9.dmg')];
+    expect(pickInstallerAsset(list, { platform: 'darwin', arch: 'arm64', version: '1.20.10' })?.name).toBe('Win-Box-0.0.1.dmg');
+  });
+
+  it('③ 完全没有 dmg → ④ 回退 .zip（darwin 便携包兜底）', () => {
+    const list = [a('Win-Box-1.20.10-arm64.zip'), a('src.tar.gz')];
+    expect(pickInstallerAsset(list, { platform: 'darwin', arch: 'arm64' })?.name).toBe('Win-Box-1.20.10-arm64.zip');
+  });
+
+  it('④ 什么安装包都没有 → null（不做强制更新，绝不锁死软件）', () => {
+    expect(pickInstallerAsset([a('latest.yml'), a('src.tar.gz')], { platform: 'darwin', arch: 'arm64' })).toBeNull();
+    expect(pickInstallerAsset([], { platform: 'darwin' })).toBeNull();
+  });
+
+  it('arch=""（未知架构）→ 跳过架构档，仍按版本 → 任意 dmg → zip', () => {
+    const list = [a('Win-Box-1.20.10-arm64.dmg'), a('Win-Box-1.20.10-x64.dmg')];
+    expect(pickInstallerAsset(list, { platform: 'darwin', arch: '' })?.name).toBe('Win-Box-1.20.10-arm64.dmg');
+  });
+
+  it('字段缺失 / 非数组的容错（不抛异常）', () => {
+    expect(pickInstallerAsset([{ name: '', browser_download_url: 'u', size: 1 }], { platform: 'darwin' })).toBeNull();
+    expect(pickInstallerAsset(undefined as unknown as ReleaseAssetInput[], { platform: 'darwin' })).toBeNull();
+  });
+});
+
+describe('★ 2026-10-12 pickInstallerAsset · win32 ≡ pickSetupAsset（Windows 零回归）', () => {
+  const a = (name: string): ReleaseAssetInput => ({ name, browser_download_url: `https://g/${name}`, size: 100 });
+  const cases: ReleaseAssetInput[][] = [
+    [a('Win-Box.1.13.0.exe'), a('Win-Box.Setup.1.13.0.exe'), a('Win-Box Setup 1.13.0 增量更新.exe')],
+    [a('Win-Box.1.13.0.exe')],
+    [a('src.zip')],
+    [a('Win-Box-1.20.10-arm64.dmg')],
+    [],
+  ];
+
+  it('逐组结果完全一致（有/无 version 参数都要一致）', () => {
+    for (const assets of cases) {
+      expect(pickInstallerAsset(assets, { platform: 'win32' })).toBe(pickSetupAsset(assets));
+      expect(pickInstallerAsset(assets, { platform: 'win32', version: '1.13.0' })).toBe(pickSetupAsset(assets, '1.13.0'));
+    }
+  });
+
+  it('platform 缺省 = win32（既有调用点不传平台，行为不变）', () => {
+    const assets = [a('Win-Box.1.13.0.exe'), a('Win-Box.Setup.1.13.0.exe')];
+    expect(pickInstallerAsset(assets)?.name).toBe('Win-Box.Setup.1.13.0.exe');
+    expect(pickInstallerAsset(assets, {})?.name).toBe(pickSetupAsset(assets)?.name);
+  });
+
+  it('win32 下即便 Release 里混了 dmg，也只挑 exe', () => {
+    const assets = [a('Win-Box-1.20.10-arm64.dmg'), a('Win-Box.Setup.1.20.10.exe')];
+    expect(pickInstallerAsset(assets, { platform: 'win32', version: '1.20.10' })?.name).toBe('Win-Box.Setup.1.20.10.exe');
   });
 });
 

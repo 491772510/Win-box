@@ -10,6 +10,13 @@
 //   ② 只有「远端版本更高 **且** 找到可用的 Setup 安装包」才会强制更新（updateAvailable = true）。
 //   ③ 加速前缀按顺序尝试，最后回退 **直连** github.com（加速站失效不致命）。
 
+// ★ 2026-10-12（macOS 适配 · T04）：平台事实一律取自 `src/shared/platform.ts`（唯一真源），
+//   本文件不再自己读 `process.platform` / `process.arch`。
+import { archTag, isMac, type ArchTag, type InstallerPlatform } from './platform';
+
+/** 发布资产挑选的目标平台（win32 = 既有 Setup 语义；darwin = dmg / zip）—— 真源在 platform.ts，此处转出便于调用方单点引用 */
+export type { InstallerPlatform };
+
 /** 发布仓库（唯一来源） */
 export const UPDATE_REPO = 'yagami-hue/Win-box';
 
@@ -295,14 +302,43 @@ export function buildAccelUrls(url: string, prefixes: string[] = GH_ACCEL_PREFIX
   return out;
 }
 
+/** 安装包挑选参数（平台缺省 win32 → 既有 Windows 行为逐项不变） */
+export interface PickInstallerOptions {
+  /** 目标平台；缺省 `'win32'`（既有语义），darwin 走 dmg / zip */
+  platform?: InstallerPlatform;
+  /**
+   * dmg / zip 资产名里的架构标签（`'arm64'` / `'x64'`）；缺省取当前架构 `archTag()`。
+   * 传 `''` 表示「不挑架构」（未知架构时 `archTag()` 也会返回 `''`）。
+   */
+  arch?: ArchTag;
+  /** 优先挑名字里含该版本的资产（会先做 `normalizeVersion`） */
+  version?: string;
+}
+
+/** 资产名匹配：只看扩展名，大小写不敏感 */
+function hasExt(name: string, ext: string): boolean {
+  return new RegExp(`\\.${ext}$`, 'i').test(name);
+}
+
+/** 只保留「有合法 name 字符串」的资产（GitHub 接口偶发字段缺失，防御性过滤） */
+function validAssets(assets: ReleaseAssetInput[]): ReleaseAssetInput[] {
+  return (Array.isArray(assets) ? assets : []).filter((a) => !!a && typeof a.name === 'string');
+}
+
+/** 名字里是否带 `-<arch>` 段（`Win-Box-1.20.10-arm64.dmg` / `-x64.dmg`） */
+function hasArchTag(name: string, arch: string): boolean {
+  const tag = String(arch || '').trim();
+  if (!tag) return false;
+  // arch 取值只会是 'arm64' / 'x64'，不含正则元字符，可直接拼进 pattern
+  return new RegExp(`-${tag}(?:[^A-Za-z0-9]|$)`, 'i').test(name);
+}
+
 /**
- * 从 Release 资产里挑出 **Setup 安装包**（`Win-Box.Setup.x.y.z.exe`）。
- * 匹配顺序：名字含 setup 的 .exe → 名字含目标版本者优先 → 其余 .exe 兜底。
- * 找不到任何 .exe → null（此时不做强制更新）。
+ * win32 安装包挑选（**与改动前 `pickSetupAsset` 的实现逐个分支一致**，勿改顺序）：
+ *   名字含 setup 的 .exe → 名字含目标版本者优先 → 其余 .exe 兜底 → 无 .exe 返回 null。
  */
-export function pickSetupAsset(assets: ReleaseAssetInput[], version?: string): ReleaseAssetInput | null {
-  const list = Array.isArray(assets) ? assets : [];
-  const exes = list.filter((a) => a && typeof a.name === 'string' && /\.exe$/i.test(a.name));
+function pickWindowsInstaller(list: ReleaseAssetInput[], version?: string): ReleaseAssetInput | null {
+  const exes = list.filter((a) => hasExt(a.name, 'exe'));
   if (!exes.length) return null;
   const setups = exes.filter((a) => /setup/i.test(a.name));
   const pool = setups.length ? setups : exes;
@@ -312,6 +348,53 @@ export function pickSetupAsset(assets: ReleaseAssetInput[], version?: string): R
     if (exact) return exact;
   }
   return pool[0];
+}
+
+/**
+ * darwin 安装包挑选（严格按架构文档的四级顺序，可单测）：
+ *   ① `.dmg` 且名字带 `-<arch>` → ② `.dmg` 且名字含目标版本 → ③ 任意 `.dmg` → ④ 任意 `.zip` → null。
+ *   `.zip` 是 darwin 便携包兜底（解压后直接拖进 Applications）。
+ */
+function pickMacInstaller(list: ReleaseAssetInput[], arch: ArchTag, version?: string): ReleaseAssetInput | null {
+  const dmg = list.filter((a) => hasExt(a.name, 'dmg'));
+  if (dmg.length) {
+    const tagged = dmg.find((a) => hasArchTag(a.name, arch));
+    if (tagged) return tagged;
+    const v = version ? normalizeVersion(version) : '';
+    if (v) {
+      const byVersion = dmg.find((a) => a.name.includes(v));
+      if (byVersion) return byVersion;
+    }
+    return dmg[0];
+  }
+  const zip = list.filter((a) => hasExt(a.name, 'zip'));
+  if (zip.length) return zip[0];
+  return null;
+}
+
+/**
+ * ★ 2026-10-12（macOS 适配）：**平台化的安装包挑选**。
+ *   - win32：逐分支等价于原 `pickSetupAsset`（Setup .exe → 版本匹配 → 任意 .exe）。
+ *   - darwin：`-<arch>.dmg` → 含版本 `.dmg` → 任意 `.dmg` → 任意 `.zip` → null。
+ *     原实现只认 `/\.exe$/i`，darwin 上恒返回 null（= 有新版也不更新），这是本次要修的根因。
+ * 纯函数（零 electron / 零 fs），平台与架构一律来自 `src/shared/platform.ts`。
+ */
+export function pickInstallerAsset(
+  assets: ReleaseAssetInput[],
+  o: PickInstallerOptions = {},
+): ReleaseAssetInput | null {
+  const list = validAssets(assets);
+  const platform: InstallerPlatform = o.platform === 'darwin' ? 'darwin' : 'win32';
+  if (!isMac(platform)) return pickWindowsInstaller(list, o.version);
+  return pickMacInstaller(list, o.arch ?? archTag(), o.version);
+}
+
+/**
+ * 从 Release 资产里挑出 **Setup 安装包**（`Win-Box.Setup.x.y.z.exe`）。
+ * 兼容旧签名：= `pickInstallerAsset(assets, { platform: 'win32', version })` —— **既有断言全部保持**。
+ */
+export function pickSetupAsset(assets: ReleaseAssetInput[], version?: string): ReleaseAssetInput | null {
+  return pickInstallerAsset(assets, { platform: 'win32', version });
 }
 
 /** GitHub Release JSON → 解析结果（容错：字段缺失一律给默认值） */

@@ -2,18 +2,49 @@
 import { app } from 'electron';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
+import {
+  isMac,
+  javaExeName,
+  platformName,
+  type PlatformName,
+} from '../../shared/platform';
 import { resourceRootCandidates, pickResourceRoot, type ResolveCtx } from './resolveResources';
 
 export function userDataDir(): string {
   return app.getPath('userData');
 }
 
-/** Local imports are owned copies, never files in the user's selected folder. */
+/**
+ * Local imports are owned copies, never files in the user's selected folder.
+ *
+ * ★ 2026-10-12（macOS 适配 P0-8）：darwin 下**绝不能落在 `.app` 内部** ——
+ *   `dirname(app.getPath('exe'))` = `<App>/Contents/MacOS`，往里写会破坏签名密封
+ *   （Gatekeeper 直接判「已损坏」）。macOS 一律走 `userData/imports`
+ *   （= `~/Library/Application Support/Win-Box/imports`）。
+ *   Windows 分支（便携版 PORTABLE_EXECUTABLE_DIR / 安装目录 / 开发态）逻辑一字不动。
+ */
 export function localImportsDir(): string {
+  if (isMac()) return join(app.getPath('userData'), 'imports');
   const installDir = app.isPackaged
     ? process.env.PORTABLE_EXECUTABLE_DIR || dirname(app.getPath('exe'))
     : app.getAppPath();
   return join(installDir, 'imports');
+}
+
+/**
+ * ★ 2026-10-12（macOS 适配 P0-3）：JRE 可执行文件候选（顺序＝优先级）。
+ *   - win32：`jvm/jre/bin/java.exe`
+ *   - darwin：`jvm/jre/bin/java` + `jvm/jre/Contents/Home/bin/java`
+ *     （macOS 的 JRE/jlink 镜像既有 `bin/java` 也有 `Contents/Home/bin/java` 两种布局，都要认）
+ */
+export function javaCandidates(root: string, p: PlatformName = platformName()): string[] {
+  if (!root) return [];
+  const base = join(root, 'jvm', 'jre');
+  const name = javaExeName(p);
+  if (isMac(p)) {
+    return [join(base, 'bin', name), join(base, 'Contents', 'Home', 'bin', name)];
+  }
+  return [join(base, 'bin', name)];
 }
 
 /**
@@ -62,7 +93,7 @@ export function distDir(): string {
 
 /** 组装当前运行时的解析上下文 */
 function ctx(): ResolveCtx {
-  const c: ResolveCtx = { packaged: app.isPackaged };
+  const c: ResolveCtx = { packaged: app.isPackaged, platform: platformName() };
   if (app.isPackaged) {
     c.resourcesPath = process.resourcesPath;
     try {
@@ -93,8 +124,9 @@ export function resourcesDir(): string {
 export function resourcesDirDebug(): string {
   return resourceRootCandidates(ctx())
     .map((c) => {
-      const java = join(c, 'jvm', 'jre', 'bin', 'java.exe');
-      const mark = existsSync(c) ? (existsSync(java) ? '[OK]' : '[? ]') : '[--]';
+      // ★ 2026-10-12：不再硬编码 `java.exe`（darwin 上没有该后缀，标记会恒为 `[? ]`）
+      const javaOk = javaCandidates(c).some((j) => existsSync(j));
+      const mark = existsSync(c) ? (javaOk ? '[OK]' : '[? ]') : '[--]';
       return `${mark} ${c}`;
     })
     .join('\n');

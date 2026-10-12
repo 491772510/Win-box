@@ -6,6 +6,8 @@ import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Logger } from '../../shared/types';
 import { resourcesDir } from '../util/paths';
+import { exeName, isMac, platformName, type PlatformName } from '../../shared/platform';
+import { probeTool } from '../util/toolProbe';
 
 const SEGMENT_SECONDS = 6;
 const BLOCK_BYTES = 512 * 1024;
@@ -18,6 +20,67 @@ const PROBE_TIMEOUT_MS = 180_000;
 const SEGMENT_TIMEOUT_MS = 180_000;
 type Input = { source: string; size: number; expires: number; blocks: Map<number, Buffer>; pending: Map<number, Promise<Buffer>>; controller: AbortController; procs: Set<ChildProcess> };
 type Session = { source: string; duration: number; expires: number; segments: Map<number, Buffer>; pending: Map<number, Promise<Buffer>>; procs: Set<ChildProcess> };
+
+/** ffmpeg / ffprobe 的解析结果（`missing` 为空 ⟺ 两个二进制都就位） */
+export interface FfmpegBins {
+  ffmpeg: string;
+  ffprobe: string;
+  /** 缺失的工具名（`'ffmpeg'` / `'ffprobe'`）；空 = 全部就位 */
+  missing: string[];
+  /** 缺失时的人话修复指引；未缺失时为空串 */
+  hint: string;
+}
+
+export interface ResolveFfmpegOptions {
+  /** 随包 resources 根（`resourcesDir()`） */
+  resourcesRoot: string;
+  /** 用户配置覆盖（按工具名给绝对路径；缺省走内置 → 本机探测） */
+  override?: { ffmpeg?: string; ffprobe?: string };
+  /** 缺省 = 当前真实平台 */
+  platform?: PlatformName;
+  env?: Record<string, string | undefined>;
+  home?: string;
+  /** 注入，便于单测（不 import node:fs 到纯函数里） */
+  exists: (p: string) => boolean;
+}
+
+/**
+ * ★ 2026-10-12（macOS 适配 §3.9）：ffmpeg / ffprobe 解析链（**纯函数**，可单测）。
+ *
+ * 顺序（与全项目 `probeTool` 口径一致）：用户覆盖 → 随包内置 `resources/ffmpeg/<exe>` → 本机探测
+ * （darwin：Homebrew `/opt/homebrew/bin` → `/usr/local/bin` → `/usr/bin` → PATH）。
+ *
+ * 仓库里 `resources/ffmpeg/` **只有一个 README.txt**（二进制未入库）→ macOS 上必然落到本机探测，
+ * 缺失时给 `brew install ffmpeg` 人话提示；**win32 缺失时保持原有文案「缺少随包媒体兼容组件」逐字不变**。
+ */
+export function resolveFfmpeg(o: ResolveFfmpegOptions): FfmpegBins {
+  const p = o.platform ?? platformName();
+  const bundledOf = (tool: 'ffmpeg' | 'ffprobe'): string =>
+    join(o.resourcesRoot, 'ffmpeg', exeName(tool, p));
+  const missing: string[] = [];
+  const pick = (tool: 'ffmpeg' | 'ffprobe'): string => {
+    const r = probeTool({
+      tool,
+      override: o.override?.[tool],
+      bundled: bundledOf(tool),
+      platform: p,
+      env: o.env,
+      home: o.home,
+      exists: o.exists,
+    });
+    if (!r.path) missing.push(tool);
+    return r.path;
+  };
+  const ffmpeg = pick('ffmpeg');
+  const ffprobe = pick('ffprobe');
+  let hint = '';
+  if (missing.length) {
+    if (isMac(p)) hint = '未找到 ffmpeg/ffprobe。请执行 brew install ffmpeg，或在配置页指定路径。';
+    else if (p === 'win32') hint = '缺少随包媒体兼容组件';
+    else hint = `未找到 ffmpeg/ffprobe。请用系统包管理器安装 ffmpeg（如 apt install ffmpeg）。`;
+  }
+  return { ffmpeg, ffprobe, missing, hint };
+}
 
 export function htmlMediaPlan(probe: any): { duration: number; compatible: boolean } {
   const streams = Array.isArray(probe?.streams) ? probe.streams : [];
@@ -40,7 +103,18 @@ export function htmlPlaylist(duration: number): string {
 export class HtmlMedia {
   private sessions = new Map<string, Session>();
   private inputs = new Map<string, Input>();
+  /** ffmpeg/ffprobe 解析结果缓存（成功即缓存；失败允许下次重试，用户装完后不必重启应用） */
+  private bins: FfmpegBins | null = null;
   constructor(private log: Logger) {}
+
+  /** 取 ffmpeg / ffprobe（解析一次即缓存；缺失时 `bins.hint` 是人话修复指引） */
+  private ffmpegBins(): FfmpegBins {
+    const cached = this.bins;
+    if (cached && !cached.missing.length) return cached;
+    const bins = resolveFfmpeg({ resourcesRoot: resourcesDir(), exists: existsSync });
+    this.bins = bins;
+    return bins;
+  }
 
   private run(exe: string, args: string[], timeout: number, owner?: { procs: Set<ChildProcess> }): Promise<Buffer> {
     return new Promise((resolve, reject) => {
@@ -153,9 +227,9 @@ export class HtmlMedia {
         if (local.hostname !== '127.0.0.1' || local.port !== String(req.socket.localPort) || !['/play', '/bt'].some(p => local.pathname === p || local.pathname.startsWith(p + '/'))) {
           json(400, { error: '无效的本地播放地址' }); return;
         }
-        const ffprobe = join(resourcesDir(), 'ffmpeg', 'ffprobe.exe');
-        const ffmpeg = join(resourcesDir(), 'ffmpeg', 'ffmpeg.exe');
-        if (!existsSync(ffprobe) || !existsSync(ffmpeg)) throw new Error('缺少随包媒体兼容组件');
+        // ★ 2026-10-12（macOS 适配）：随包内置 → 本机（Homebrew / PATH）探测；缺失给平台化人话提示。
+        const bins = this.ffmpegBins();
+        if (bins.missing.length) throw new Error(bins.hint);
         while (this.inputs.size >= 6) this.release(this.inputs.keys().next().value!);
         const id = randomUUID();
         const input: Input = { source, size: 0, expires: Date.now() + 30 * 60 * 1000, blocks: new Map(), pending: new Map(), controller: new AbortController(), procs: new Set() };
@@ -163,7 +237,7 @@ export class HtmlMedia {
         const inputUrl = `http://127.0.0.1:${req.socket.localPort}/html/${id}/source`;
         let info: any;
         try {
-          info = await this.run(ffprobe, ['-v', 'error', '-rw_timeout', String(FFMPEG_IO_TIMEOUT_US), '-analyzeduration', '1000000', '-probesize', '524288', '-show_streams', '-show_format', '-of', 'json', inputUrl], PROBE_TIMEOUT_MS, input).then(b => JSON.parse(b.toString('utf8')));
+          info = await this.run(bins.ffprobe, ['-v', 'error', '-rw_timeout', String(FFMPEG_IO_TIMEOUT_US), '-analyzeduration', '1000000', '-probesize', '524288', '-show_streams', '-show_format', '-of', 'json', inputUrl], PROBE_TIMEOUT_MS, input).then(b => JSON.parse(b.toString('utf8')));
         } catch (e) { this.release(id); throw e; }
         const plan = htmlMediaPlan(info);
         const video = info.streams?.find((s: any) => s.codec_type === 'video');
@@ -194,7 +268,7 @@ export class HtmlMedia {
         if (!work) {
           if (s.pending.size >= 2) { json(503, { error: '正在处理媒体分片' }); return; }
           const start = n * SEGMENT_SECONDS;
-          work = this.run(join(resourcesDir(), 'ffmpeg', 'ffmpeg.exe'), [
+          work = this.run(this.ffmpegBins().ffmpeg, [
             '-v', 'error', '-nostdin', '-rw_timeout', String(FFMPEG_IO_TIMEOUT_US), '-analyzeduration', '1000000', '-probesize', '524288', '-ss', String(start), '-i', s.source,
             '-t', String(Math.min(SEGMENT_SECONDS, s.duration - start)), '-map', '0:v:0?', '-map', '0:a:0?',
             '-sn', '-dn', '-threads', '2',

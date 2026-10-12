@@ -31,7 +31,16 @@ _e2e_*
 *.tmp.ts
 
 # 站点级研究文档（源健康/解密分析等，不开源）
-docs/
+# ★ 2026-10-12：用 `docs/**` 而不是 `docs/` —— git 的规则是「目录被整目录忽略时不会往里递归，
+#   目录内文件的 `!` 白名单会被直接吃掉」。写成 `docs/**`（只忽略目录内容、不忽略目录本身）
+#   才能为下面几个 macOS 适配文档开白名单。忽略语义完全等价：docs 下其它文件依旧不入库。
+docs/**
+# macOS 适配文档需要随源码一起开源（构建方与贡献者依赖它）
+!docs/prd-macos.md
+!docs/architecture-macos.md
+!docs/macos-build.md
+# QA 验收报告（记录验证结论与遗留清单，有保留价值）
+!docs/qa-report-macos.md
 
 # --- 专有 / 运行时 / 编译产物：不随源码分发 ---
 # mpv 播放内核（官方 v0.41.0 构建，约 100MB；GPL/LGPL，随安装包分发，不入源码库）
@@ -49,3 +58,7 @@ resources/jvm/*.jar
 
 # --- 内部交付文档（含产物 SHA / 版本节奏等） ---
 docs/交付说明.md
+
+# --- macOS 图标产物：由 scripts/make-icon.mjs 在 Mac 上现生成（sips + iconutil），不入库 ---
+build/icon.icns
+build/icon.iconset/

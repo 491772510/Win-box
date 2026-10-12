@@ -58,10 +58,13 @@ interface ImportReturn {
   urls?: { name: string; url: string }[];
 }
 
+/** preload 平台通道返回的归一化平台名。 */
+export type AppPlatformName = 'darwin' | 'win32' | 'linux';
+
 declare global {
   interface Window {
     api: {
-      system: { ping: () => Promise<IpcResult<string>>; icon: () => Promise<IpcResult<string>>; setTheme: (t: string) => Promise<IpcResult<void>>; quit: () => Promise<IpcResult<void>>; dataDir: () => Promise<IpcResult<DataDirInfo>>; sessionId: () => Promise<IpcResult<string>> };
+      system: { ping: () => Promise<IpcResult<string>>; icon: () => Promise<IpcResult<string>>; setTheme: (t: string) => Promise<IpcResult<void>>; quit: () => Promise<IpcResult<void>>; dataDir: () => Promise<IpcResult<DataDirInfo>>; sessionId: () => Promise<IpcResult<string>>; platform: () => Promise<IpcResult<{ platform: AppPlatformName }>> };
       config: {
         import: (a: { url?: string; json?: string }) => Promise<IpcResult<ImportReturn>>;
         listSites: () => Promise<IpcResult<SourceBean[]>>;
@@ -102,6 +105,8 @@ declare global {
         driveBindKeys: () => Promise<IpcResult<string[]>>;
         gotoDriveBind: () => Promise<IpcResult<void>>;
         onNavDriveBind: (cb: () => void) => () => void;
+        /** ★ macOS 菜单「设置…」（Cmd+,）广播订阅；返回退订函数（勿泄漏监听器） */
+        onGotoSettings: (cb: () => void) => () => void;
       };
       vod: {
         home: (key: string) => Promise<IpcResult<HomeResult>>;
@@ -260,7 +265,7 @@ declare global {
       update: {
         check: () => Promise<IpcResult<UpdateCheckResult>>;
         download: () => Promise<IpcResult<{ ok: boolean; path?: string; error?: string }>>;
-        install: () => Promise<IpcResult<{ ok: boolean; path: string }>>;
+        install: () => Promise<IpcResult<{ ok: boolean; path: string; hint?: string }>>;
         onProgress: (cb: (p: UpdateProgress) => void) => () => void;
       };
     };
@@ -275,6 +280,8 @@ async function unwrap<T>(p: Promise<IpcResult<T>>): Promise<T> {
 
 export const client = {
   ping: () => unwrap(window.api.system.ping()),
+  /** 主进程归一化平台；渲染层只允许通过此 IPC 入口读取。 */
+  platform: () => unwrap(window.api.system.platform()),
   appIcon: () => unwrap(window.api.system.icon()),
   setTheme: (t: string) => unwrap(window.api.system.setTheme(t)),
   importConfig: (a: { url?: string; json?: string }) => unwrap(window.api.config.import(a)),
@@ -317,6 +324,8 @@ export const client = {
   // ★ 播放网盘资源未绑定 cookie → 让主窗口跳到「点播页」（源主页有「网盘绑定」入口；播放器窗口也走此路径）
   gotoDriveBind: () => unwrap(window.api.config.gotoDriveBind()),
   onNavDriveBind: (cb: () => void) => window.api.config.onNavDriveBind(cb),
+  /** ★ macOS 菜单「设置…」（Cmd+,）→ 广播订阅；直接返回 preload 的退订函数（供 useEffect 清理） */
+  onGotoSettings: (cb: () => void) => window.api.config.onGotoSettings(cb),
   winMinimize: () => unwrap(window.api.win.minimize()),
   winMaximize: () => unwrap(window.api.win.maximize()),
   winClose: () => unwrap(window.api.win.close()),

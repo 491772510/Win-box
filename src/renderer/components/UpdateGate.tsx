@@ -8,6 +8,7 @@ import { client } from '../api/client';
 import { formatBytes, type UpdateCheckResult, type UpdateProgress } from '../../shared/update';
 import { isDetailWinHash } from '../../shared/detailWin';
 import { isSearchWindow } from '../lib/searchWin';
+import { isMacRenderer } from '../lib/platform';
 
 /** 独立播放器窗口（`#/player`）不参与门禁：更新由主窗口统一触发 */
 function isPlayerWindow(): boolean {
@@ -27,6 +28,9 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
   const [info, setInfo] = useState<UpdateCheckResult | null>(null);
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
   const [error, setError] = useState('');
+  // ★ macOS 适配：darwin 下 openPath(.dmg) 只是挂载镜像、不会自动安装，
+  //   主进程据此返回 `hint` 引导用户手动把 Win-Box 拖进「应用程序」。win32 恒为空串。
+  const [hint, setHint] = useState('');
   const [busy, setBusy] = useState(false);
   const started = useRef(false);
 
@@ -53,7 +57,9 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
         return;
       }
       setProgress({ phase: 'launching', received: 0, total: 0, percent: 100, speed: 0, message: '正在启动安装程序…' });
-      await client.updateInstall();
+      // ★ macOS：主进程返回 hint（引导手动覆盖安装）；win32 无 hint（空串/undefined）→ 不显示，零回归。
+      const r = await client.updateInstall();
+      if (r?.hint) setHint(r.hint);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -90,7 +96,10 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
   const statusText = error
     ? '下载失败'
     : launching
-      ? '安装程序已启动，即将退出本程序…'
+      // ★ darwin 拉起 .dmg 后**不退出**（主进程 shouldQuitAfterLaunchingInstaller=false）→ 文案不能再说「即将退出」。
+      //   「怎么做」的完整指引**只由主进程返回的 hint 提供**（单一文案源，避免两处漂移），
+      //   这里仅给一句中性的进行态文案。
+      ? (isMacRenderer() ? '正在打开安装包…' : '安装程序已启动，即将退出本程序…')
       : speedtest
         ? progress?.message || '正在测速选择最快的下载线路…'
         : `正在下载 ${info.asset?.name || ''}`;
@@ -133,6 +142,13 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
               <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
                 请检查网络或代理设置后重试。
               </div>
+            </div>
+          )}
+
+          {!error && hint && (
+            // ★ macOS：需要用户照做的操作指引（拖入「应用程序」），win32 无 hint 永不显示
+            <div className="muted upd-hint" style={{ marginTop: 10, lineHeight: 1.6 }}>
+              {hint}
             </div>
           )}
 

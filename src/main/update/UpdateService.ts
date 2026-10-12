@@ -22,15 +22,18 @@ import {
   buildAccelUrls,
   isUpdateAvailable,
   parseLatestRelease,
-  pickSetupAsset,
+  pickInstallerAsset,
   rankBySpeed,
   sampleBps,
+  type InstallerPlatform,
   type ReleaseJson,
   type SpeedSample,
   type UpdateAsset,
   type UpdateCheckResult,
   type UpdateProgress,
 } from '../../shared/update';
+// ★ 2026-10-12（macOS 适配 · T04）：平台/架构唯一真源，不再裸读 process.platform / process.arch
+import { archTag, isMac } from '../../shared/platform';
 import { cacheDir } from '../util/paths';
 import { dispatchChain } from '../net/proxy';
 import type { Logger } from '../../shared/types';
@@ -87,7 +90,10 @@ export class UpdateService {
 
     const rel = parseLatestRelease(json);
     const newer = isUpdateAvailable(localVersion, rel.version);
-    const chosen = newer ? pickSetupAsset(rel.assets, rel.version) : null;
+    // ★ 2026-10-12：按平台挑安装包（win32 = Setup .exe；darwin = dmg → zip）
+    const platform: InstallerPlatform = isMac() ? 'darwin' : 'win32';
+    const arch = archTag();
+    const chosen = newer ? pickInstallerAsset(rel.assets, { platform, arch, version: rel.version }) : null;
     const asset: UpdateAsset | undefined = chosen
       ? {
           name: chosen.name,
@@ -96,7 +102,7 @@ export class UpdateService {
           accelUrls: buildAccelUrls(chosen.browser_download_url),
         }
       : undefined;
-    if (newer && !asset) this.log.w(`更新检查：远端 ${rel.version} 更高，但未找到 .exe 安装包，跳过强制更新`);
+    if (newer && !asset) this.log.w(`更新检查：远端 ${rel.version} 更高，但未找到安装包（platform=${platform} arch=${arch || 'unknown'}），跳过强制更新`);
     if (newer && asset) this.log.i(`更新检查：本地 ${localVersion} < 远端 ${rel.version}，需强制更新（${asset.name}）`);
 
     this.lastAsset = asset || null;
@@ -401,11 +407,19 @@ export class UpdateService {
     onProgress({ phase: 'downloading', received, total: total || received, percent: 100, speed });
   }
 
-  /** 启动安装包（EXE 直接后台拉起）；返回的错误串为空即成功 */
-  async launch(path: string): Promise<{ ok: boolean; error?: string }> {
+  /**
+   * 启动安装包（win32：EXE 直接后台拉起；darwin：挂载并打开 .dmg）。
+   * 返回的 `error` 为空即成功；
+   * ★ 2026-10-12：`hint` 是给用户的引导文案 —— darwin 打开 dmg 后需要**手动拖拽覆盖安装**
+   *   （不接 Sparkle / 不做静默替换），win32 恒为 `''`（既有行为，渲染层不追加任何提示）。
+   */
+  async launch(path: string): Promise<{ ok: boolean; error?: string; hint?: string }> {
     const err = await shell.openPath(path);
     if (err) return { ok: false, error: err };
     this.log.i(`更新安装：已拉起安装程序 ${path}`);
-    return { ok: true };
+    const hint = isMac()
+      ? '已打开安装包（.dmg）。请在访达中将 Win-Box 拖入「应用程序」文件夹覆盖安装。'
+      : '';
+    return { ok: true, hint };
   }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('electron', () => ({ app: { isPackaged: false, getPath: () => '' } }));
-import { htmlMediaPlan, htmlPlaylist } from '../src/main/player/HtmlMedia';
+import { htmlMediaPlan, htmlPlaylist, resolveFfmpeg } from '../src/main/player/HtmlMedia';
 import { HtmlMedia } from '../src/main/player/HtmlMedia';
 import { createServer } from 'node:http';
 import { afterEach } from 'vitest';
@@ -44,5 +44,106 @@ describe('HTML media codec compatibility', () => {
       const invalid = await originalFetch(base, { headers: { Range: 'bytes=99-' } });
       expect(invalid.status).toBe(416);
     } finally { media.stop(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); }
+  });
+});
+
+// ★ 2026-10-12（macOS 适配 T03 §3.9）：ffmpeg / ffprobe 解析链。
+//   仓库里 resources/ffmpeg/ 只有一个 README.txt（二进制未入库）→ darwin 必然落到本机探测，
+//   文案必须变成 `brew install ffmpeg`；而 **win32 文案必须逐字保持「缺少随包媒体兼容组件」**。
+describe('resolveFfmpeg — 用户覆盖 → 随包内置 → Homebrew/PATH（★ 平台化）', () => {
+  const ROOT = 'R:\\resources';
+
+  it('★ win32 全部缺失 → 文案逐字保持「缺少随包媒体兼容组件」', () => {
+    const bins = resolveFfmpeg({
+      resourcesRoot: ROOT,
+      platform: 'win32',
+      env: { ProgramFiles: 'C:\\PF' },
+      exists: () => false,
+    });
+    expect(bins.missing).toEqual(['ffmpeg', 'ffprobe']);
+    expect(bins.ffmpeg).toBe('');
+    expect(bins.ffprobe).toBe('');
+    expect(bins.hint).toBe('缺少随包媒体兼容组件');
+  });
+
+  it('★ darwin 全部缺失 → hint 含 `brew install ffmpeg`（不再是 win32 文案）', () => {
+    const bins = resolveFfmpeg({
+      resourcesRoot: '/Applications/Win-Box.app/Contents/Resources',
+      platform: 'darwin',
+      env: { HOME: '/Users/u' },
+      exists: () => false,
+    });
+    expect(bins.missing).toEqual(['ffmpeg', 'ffprobe']);
+    expect(bins.hint).toContain('brew install ffmpeg');
+    expect(bins.hint).not.toBe('缺少随包媒体兼容组件');
+  });
+
+  it('win32 随包内置存在 → 用内置（路径带 .exe），无 hint', () => {
+    const ffmpeg = `${ROOT}\\ffmpeg\\ffmpeg.exe`;
+    const ffprobe = `${ROOT}\\ffmpeg\\ffprobe.exe`;
+    const bins = resolveFfmpeg({
+      resourcesRoot: ROOT,
+      platform: 'win32',
+      env: {},
+      exists: (p) => p === ffmpeg || p === ffprobe,
+    });
+    expect(bins.ffmpeg).toBe(ffmpeg);
+    expect(bins.ffprobe).toBe(ffprobe);
+    expect(bins.missing).toEqual([]);
+    expect(bins.hint).toBe('');
+  });
+
+  it('★ darwin 随包缺失 → 落到 Homebrew（探测顺序：/opt/homebrew/bin → /usr/local/bin → /usr/bin）', () => {
+    const bins = resolveFfmpeg({
+      resourcesRoot: '/res',
+      platform: 'darwin',
+      env: {},
+      exists: (p) => p === '/opt/homebrew/bin/ffmpeg' || p === '/opt/homebrew/bin/ffprobe',
+    });
+    expect(bins.ffmpeg).toBe('/opt/homebrew/bin/ffmpeg');
+    expect(bins.ffprobe).toBe('/opt/homebrew/bin/ffprobe');
+    expect(bins.missing).toEqual([]);
+
+    const intel = resolveFfmpeg({
+      resourcesRoot: '/res',
+      platform: 'darwin',
+      env: { PATH: '/usr/local/bin:/usr/bin' },
+      exists: (p) => p === '/usr/local/bin/ffprobe',
+    });
+    expect(intel.ffprobe).toBe('/usr/local/bin/ffprobe');
+    expect(intel.ffmpeg).toBe('');
+    expect(intel.missing).toEqual(['ffmpeg']);
+    expect(intel.hint).toContain('brew install ffmpeg');
+  });
+
+  it('用户覆盖优先于随包内置（按工具名分别覆盖）', () => {
+    const bins = resolveFfmpeg({
+      resourcesRoot: ROOT,
+      platform: 'win32',
+      override: { ffmpeg: 'D:\\tools\\ffmpeg.exe' },
+      env: {},
+      exists: (p) => p === 'D:\\tools\\ffmpeg.exe' || p === `${ROOT}\\ffmpeg\\ffprobe.exe`,
+    });
+    expect(bins.ffmpeg).toBe('D:\\tools\\ffmpeg.exe');
+    expect(bins.ffprobe).toBe(`${ROOT}\\ffmpeg\\ffprobe.exe`);
+    expect(bins.missing).toEqual([]);
+  });
+
+  it('darwin 的候选（随包内置 + 系统）都不带 .exe（写死 .exe 会让内置在 macOS 永远探不到）', () => {
+    const seen: string[] = [];
+    const bins = resolveFfmpeg({
+      resourcesRoot: '/res',
+      platform: 'darwin',
+      env: {},
+      exists: (p) => {
+        seen.push(p);
+        return /[\\/]ffmpeg$/.test(p) || /[\\/]ffprobe$/.test(p);
+      },
+    });
+    expect(bins.ffmpeg).not.toBe('');
+    expect(bins.ffprobe).not.toBe('');
+    expect(bins.ffmpeg.endsWith('.exe')).toBe(false);
+    expect(bins.ffprobe.endsWith('.exe')).toBe(false);
+    expect(seen.some((p) => p.endsWith('.exe'))).toBe(false);
   });
 });

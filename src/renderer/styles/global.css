@@ -47,7 +47,7 @@ body {
     radial-gradient(900px 420px at -10% 110%, color-mix(in srgb, var(--accent-2) 8%, transparent), transparent 55%),
     var(--bg-glass);
   color: var(--text);
-  font: 14px/1.55 -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   overflow: hidden;
   -webkit-user-select: none; user-select: none;
 }
@@ -96,6 +96,27 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .tb-btn:hover { background: var(--bg-elev2); color: var(--text); box-shadow: none; }
 .tb-btn.tb-close:hover { background: #e81123; color: #fff; }
 .tb-btn:active { transform: none; }
+/* macOS 自绘交通灯：默认主题也需完整样式；Apple 皮肤可在 apple.css 内继续覆盖材质。 */
+.titlebar.ap-titlebar { justify-content: flex-start; gap: 8px; padding: 0 12px; }
+.ap-lights { display: flex; align-items: center; gap: 8px; flex: none; }
+.ap-light {
+  all: unset; -webkit-app-region: no-drag; cursor: default;
+  width: 12px; height: 12px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: rgba(0, 0, 0, .72); box-shadow: inset 0 0 0 .5px rgba(0, 0, 0, .18);
+}
+.ap-light svg { opacity: 0; transition: opacity .12s; }
+.ap-lights:hover .ap-light svg { opacity: .72; }
+.ap-light-close { background: #ff5f57; }
+.ap-light-min { background: #febc2e; }
+.ap-light-zoom { background: #28c840; }
+.ap-light:active { filter: brightness(.88); }
+/* 播放器的小窗口/置顶属于独立操作区，绝不挤占交通灯的固定空间。 */
+.ap-extra {
+  height: 100%; margin-left: 4px; padding-left: 8px; border-left: 1px solid var(--border-soft);
+  display: flex; align-items: center; gap: 2px; flex: none; -webkit-app-region: no-drag;
+}
+.ap-extra .tb-btn { width: 32px; height: 28px; }
 /* ★ 2026-10-08（用户要求「置顶按钮挪到最小化按钮旁边」）：标题栏置顶按钮开启态（accent 高亮 + 淡底）。
    带 `:root[data-theme]` 前缀压过皮肤（`.app.pwin .tb-btn:hover` 等），同 §C54 教训。 */
 :root[data-theme] .tb-btn.tb-pin-on { color: var(--accent); background: rgba(255, 255, 255, .12); }
@@ -650,7 +671,7 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .about-support-image { display: block; width: min(440px, calc(100vw - 62px), calc(100vh - 112px)); height: auto; border-radius: 8px; }
 
 /* ---- 外挂字幕渲染（原生 TextTrack + VTTCue，用 CSS 变量控制字号/位置） ---- */
-.vplayer video::cue { font-size: var(--sub-font, 20px); font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+.vplayer video::cue { font-size: var(--sub-font, 20px); font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
   color: #fff; background: rgba(0,0,0,.55); text-shadow: 0 1px 2px #000; line-height: 1.4; }
 .vplayer video::-webkit-media-text-track-container { bottom: var(--sub-bottom, 40px) !important; }
 /* 字幕面板 */

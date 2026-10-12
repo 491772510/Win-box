@@ -1,0 +1,473 @@
+# macOS 构建 / 打包 / 签名 / 公证 操作手册
+
+> 面向作者本人（0 代码基础，纯 Vibe coding）。**每一条命令都可以原样复制粘贴执行**，
+> 尖括号 `<...>` 里的内容按自己的情况替换。
+>
+> 适用范围：Win-Box 的 macOS（Apple Silicon / Intel）版本。
+> **Windows 构建流程完全没有变化**，照旧用 `pnpm dist`（等价于 `node scripts/build-release.mjs`）。
+
+---
+
+## 0. 先读这三句
+
+1. **macOS 版的打包只能在一台 Mac 上做。** Windows 上跑 `pnpm dist:mac` 必然失败（electron-builder 在 Windows 上无法生成 dmg / 无法调用 `codesign`）。
+2. **本仓库不自带任何第三方二进制**（mpv / ffmpeg / ffprobe / aria2c / java / python3 全部被 `.gitignore` 排除）。它们要么你自己 `brew install`，要么自己下载后放进 `resources/` 指定目录。放与不放都不影响构建成功，只影响运行时功能是否可用。
+3. **没有 Apple Developer 账号也能打包、也能自己用**，只是别人双击打开时会被系统拦截 —— 走第 8 节的「右键 → 打开」。
+
+---
+
+## 1. 环境准备
+
+### 1.1 Node 与 pnpm
+
+```bash
+node -v          # 需要 ≥ 20（项目用 Electron 33 + Vite 6）
+pnpm -v          # 没有就先装：npm i -g pnpm
+```
+
+没有 Node：去 <https://nodejs.org> 下载 **LTS** 版 pkg 安装，一路下一步。
+
+### 1.2 Xcode Command Line Tools（必须）
+
+它提供 `sips`（生成图标）、`iconutil`（生成 icns）、`codesign`（签名）、`notarytool`（公证）、`stapler`（装订公证票据）。
+
+```bash
+xcode-select --install
+```
+
+弹出安装窗口 → 点「安装」→ 同意许可 → 等它装完（约几分钟，取决于网速）。
+
+验证装好了：
+
+```bash
+xcode-select -p        # 应输出 /Library/Developer/CommandLineTools 或 /Applications/Xcode.app/Contents/Developer
+which sips iconutil codesign notarytool
+```
+
+> ⚠️ 只装 Command Line Tools 就够，**不需要**装完整的 Xcode（20GB+）。
+> 但如果你想用 Xcode 的图形界面排查签名问题，可以从 App Store 装完整 Xcode。
+
+### 1.3 拉代码装依赖
+
+```bash
+git clone https://github.com/yagami-hue/Win-box.git
+cd Win-box
+pnpm install
+```
+
+---
+
+## 2. 自备依赖二进制（重要！仓库里没有）
+
+### 2.1 放哪儿、怎么拿
+
+| 工具 | 放置路径（相对仓库根目录） | 获取方式（推荐） | 缺了会怎样 |
+| --- | --- | --- | --- |
+| `mpv` | `resources/mpv/mpv` | `brew install mpv` 后**推荐直接用本机那份、不要拷贝**；只有想固定版本时才 `cp $(which mpv) resources/mpv/mpv`（放了就会压过本机，见 §2.2 例外） | 播放器内核缺失，只能用 HTML5 内核 / 外部播放器 |
+| `ffmpeg` | `resources/ffmpeg/ffmpeg` | `brew install ffmpeg` 后 `cp $(which ffmpeg) resources/ffmpeg/ffmpeg` | 部分流媒体转封装与兼容播放不可用 |
+| `ffprobe` | `resources/ffmpeg/ffprobe` | 同上（与 ffmpeg 同源） | 探测时长/音轨失败 |
+| `aria2c` | `resources/aria2/aria2c` | `brew install aria2` 后 `cp $(which aria2c) resources/aria2/aria2c` | **磁力 / BT 播放直接不可用** |
+| `java` | `resources/jvm/jre/bin/java` | 下载 [Temurin JRE 21](https://adoptium.net/temurin/releases/)（选 macOS + aarch64/x64 + JRE），解压后把 `Contents/Home` 整个目录放到 `resources/jvm/jre/` | **所有 jar 蜘蛛不可用** |
+| `python3` | **不用放** | `brew install python@3.11` | py 蜘蛛不可用 |
+
+> 上表「放置路径」一列填的是**随包内置**的位置。注意它**不等于「一定会用到」**：
+> 除 `mpv` 外，程序都是**本机装的优先、随包只做兜底**；`mpv` 反过来是内置优先。
+> 具体差异见 **§2.2**，别跳过那一节。
+
+> 一键复制版（Apple Silicon 机器，`brew` 已装）：
+>
+> ```bash
+> # ① 装齐本机版本（ffmpeg / aria2c 之后会各拷一份进 resources/ 当兜底）
+> brew install mpv ffmpeg aria2
+>
+> # ② 只拷贝「本机优先、所以拷了也不改变结果、但能在没装的机器上兜底」的三个
+> mkdir -p resources/ffmpeg resources/aria2
+> cp "$(which ffmpeg)"   resources/ffmpeg/ffmpeg
+> cp "$(which ffprobe)"  resources/ffmpeg/ffprobe
+> cp "$(which aria2c)"   resources/aria2/aria2c
+>
+> # ③ mpv 故意不拷：拷进去会压过 brew 那份（mpv 是「内置优先」的例外链）
+> #    想让 mpv 用随包版本时再执行下面这行
+> # mkdir -p resources/mpv && cp "$(which mpv)" resources/mpv/mpv
+> ```
+>
+> Intel Mac 把上面的安装命令同样跑一遍即可（`brew` 会自动选 x64 版本）。
+> JRE 需要手动下载：Adoptium 页面选 **macOS / aarch64（Apple Silicon）或 x64（Intel）/ JRE / 21**，下 `.tar.gz`，
+> 解压出一个 `jdk-21.jre/Contents/Home/...` 结构 —— 把 **`Contents/Home` 这一层**整体拷成 `resources/jvm/jre/`，
+> 最终存在 `resources/jvm/jre/bin/java`（或 `resources/jvm/jre/Contents/Home/bin/java`，两者都会被识别）。
+
+### 2.2 ★ 探测顺序（到底用的是哪一个）
+
+口径是 **「自动探测优先、内置兜底」**：本机装了就用本机那份，找不到才回退随包。
+
+**通用链**（`src/main/util/toolProbe.ts`，除 `mpv` 外所有工具都走这条）：
+
+```
+① 用户在配置页手动填的路径（override）
+     —— 填了但文件不存在会「继续往下探」，填错不至于把功能直接关死
+② 本机探测（system）：你自己装的 Homebrew / /Applications 版本
+     /opt/homebrew/bin → /usr/local/bin → /usr/bin → PATH
+③ 随包内置（bundled）：resources/<tool>/<二进制>
+     —— 本机确实找不到才回退到它
+④ 都没有 → none（功能降级，并给一句人话安装指引，绝不崩溃）
+```
+
+**为什么 ② 在 ③ 前面**：用户自己装的那份能随手升级、编解码器更全，也不会被 Gatekeeper 因为「未签名的随包二进制」拦掉；随包二进制只在「这台机器上什么都没有」时兜底。
+
+> ⚠️ **例外：`mpv` 走的是另一条链，而且顺序是「内置优先」**
+>
+> `mpv` 不由上面这条通用链解析，而是走 `src/main/player/mpvCore.ts` 的 `resolveMpvPath()`：
+>
+> ```
+> ① override → ② bundled（resources/mpv/mpv）→ ③ system（mpv.app / Homebrew / PATH）→ ④ none
+> ```
+>
+> 这是**刻意保留**的：Windows 上随包的 `mpv.exe` 与 `Program Files\mpv\mpv.exe` 可能同时存在，
+> 一旦重排就会改变 Windows 既有的选择（违反零回归红线）。
+>
+> **macOS 上的实际含义**：只要你把文件放进了 `resources/mpv/mpv`，它就会**压过** brew 装的那一份 ——
+> 想让 brew 版生效，就**不要**往 `resources/mpv/` 里放东西。
+
+**实践建议（macOS 上照这个做最省心）：**
+
+- **优先用 `brew` 装，不要随包放。** 理由：brew 版能随手升级、不会被 Gatekeeper 因为「未签名的随包二进制」拦、也少一步递归签名。
+  - 对 `ffmpeg` / `ffprobe` / `aria2c` / `java` / `python3`：不放 `resources/` → 本机直接生效（通用链 ② 档）。
+  - 对 `mpv`：不放 `resources/mpv/` → 回退到本机的 `mpv.app` / Homebrew（例外链 ③ 档）。
+- **想固定用某个版本（比如 brew 的 mpv 太新有 bug）**：
+  - `mpv` 可以靠「放进 `resources/mpv/mpv`」直接压过本机；
+  - **其它工具做不到**（本机有就不看内置）—— 要么卸载本机那份，要么在配置页用「用户指定路径」钉住（override 永远是最高档）。
+- **`aria2c` 建议随包**（Windows 版也是随包的）作为**兜底**：磁力功能是核心能力，若用户机器上没装 brew 的 aria2，随包那份就能顶上。
+
+启动后怎么看最终用了哪个：日志里会有一行一个依赖（`<tool>=<source> <path>`，`source` 取值 `override` / `system` / `bundled` / `none`）：
+
+```
+依赖: ffmpeg=system /opt/homebrew/bin/ffmpeg
+依赖: mpv=system /opt/homebrew/bin/mpv
+依赖: aria2c=bundled /Applications/Win-Box.app/Contents/Resources/app.asar.unpacked/resources/aria2/aria2c
+依赖: java=none（brew install openjdk 或下载 Temurin JRE 放到 resources/jvm/jre）
+```
+
+读法：
+- `ffmpeg=system` → 用的是你 `brew` 装的那份（通用链第 ② 档，正常且推荐）；
+- `mpv=system` → 注意 `resources/mpv/mpv` **不存在**才会出现这行（mpv 是内置优先的例外链）；若你放了随包 mpv，这里会显示 `mpv=bundled`；
+- `aria2c=bundled` → 本机没装 aria2，程序回退用了随包那份（兜底生效，磁力照常可用）；
+- `java=none` → 两处都没找到，jar 蜘蛛会走「不可用」的人话降级。
+
+---
+
+## 3. 生成图标（只需做一次）
+
+macOS 用 `.icns`，这个文件**不入库**（`.gitignore` 已排除），在 Mac 上现生成：
+
+```bash
+node scripts/make-icon.mjs
+```
+
+它做两件事（都用 macOS 自带命令，零新增依赖）：
+
+1. `sips` 把 `build/icon.png` 缩成 10 种尺寸（16px ~ 1024px），放进临时目录 `build/icon.iconset/`
+2. `iconutil -c icns` 把它合成 `build/icon.icns`
+
+看到 `[make-icon] done: .../build/icon.icns` 就成功了。
+
+> 非 macOS 上执行会**明确报错**并给出替代方案（不会静默失败）。错误信息里会告诉你要么在 Mac 上生成后拷回来，要么用在线 png→icns 工具。
+> 源图要求：正方形、越大越好（≥ 1024×1024 最佳）。
+
+---
+
+## 4. 构建
+
+```bash
+pnpm dist:mac
+```
+
+等价于 `node scripts/build-release.mjs --mac`，内部实际执行：
+
+```
+node scripts/build-main.mjs            # 主进程打包（esbuild）
+vite build                             # 渲染层打包
+（校验赞助图 / 群二维码原图是否为真图）
+node_modules/electron-builder/out/cli/cli.js --mac dmg zip --publish never
+```
+
+**产出（在 `release<版本号>/` 目录下）：**
+
+| 文件 | 说明 |
+| --- | --- |
+| `Win-Box-<版本>-arm64.dmg` | Apple Silicon（M1/M2/M3/M4）安装包 |
+| `Win-Box-<版本>-x64.dmg` | Intel Mac 安装包（Apple Silicon 上经 Rosetta 也能跑） |
+| `Win-Box-<版本>-arm64.zip` | arm64 便携包（解压后直接拖进「应用程序」） |
+| `Win-Box-<版本>-x64.zip` | x64 便携包 |
+
+中间的 `.app` 在 `release<版本号>/` 的 `mac` / `mac-arm64` / `mac-x64` 子目录里，第 5 节签名要用到它：
+
+```bash
+find release<版本号> -maxdepth 3 -name "Win-Box.app"
+```
+
+**常见构建失败：**
+
+| 报错 | 原因 | 处理 |
+| --- | --- | --- |
+| `Missing build/icon.icns — 先在 macOS 上执行...` | 没跑第 3 步 | `node scripts/make-icon.mjs` |
+| `Private support PNG missing...` / `Private group QR image missing...` | 赞助图 / 群二维码原图是私有图片，仓库里只有占位图 | 把原图放到 `.tmp/private-assets/`，或用环境变量指定：`WINBOX_SUPPORT_IMAGE=/path/a.png WINBOX_GROUP_IMAGE=/path/b.jpg pnpm dist:mac` |
+| `Built renderer does not contain the original support image` | 同上，路径给了但没被打进产物 | 确认图存在且是原图（SHA 校验） |
+
+> **Windows 零回归**：`pnpm dist`（不带参数）走的是完全没动过的 `--win nsis` 分支，产物文件名与以前一致。
+
+---
+
+## 5. 签名（有 Apple Developer 账号才需要；没有就跳到第 8 节）
+
+### 5.1 为什么必须递归签名
+
+macOS 会对 **`.app` 内部每一个可执行文件 / 动态库单独校验**。本项目 `.app` 里塞了
+`mpv`、`ffmpeg`、`ffprobe`、`aria2c`、`java`（JRE 里还有几十个 dylib 和可执行文件）、`python3` ——
+只要有一个没签，`codesign --verify` 就失败，用户打开时表现为「已损坏」或直接被 SIGKILL。
+
+`codesign --deep` 官方不推荐用于正式分发（它会对所有嵌套项套用同一份授权，且容易漏签），
+**推荐做法是由内向外逐层签**：dylib → 嵌套可执行 → 主 `.app`。
+
+### 5.2 先查证书名
+
+```bash
+security find-identity -v -p codesigning
+```
+
+找形如 `Developer ID Application: Your Name (TEAMID1234)` 的那一行，整串复制下来。
+
+### 5.3 一步到位脚本（复制粘贴改三行即可）
+
+```bash
+cd /path/to/Win-box                      # ← 改成你的仓库路径
+APP="$(find release* -maxdepth 3 -name 'Win-Box.app' | head -1)"
+IDENT="Developer ID Application: Your Name (TEAMID1234)"   # ← 改成你的证书名
+ENT="build/entitlements.mac.plist"
+ENT_INH="build/entitlements.mac.inherit.plist"
+
+echo "→ 目标：$APP"
+
+# ⓪ 先清隔离属性（必须在签名前做；否则签名会被隔离标记污染）
+xattr -cr "$APP"
+
+# ① dylib / framework（最深的一层）
+find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -print0 \
+  | xargs -0 -n1 -I{} codesign --force --timestamp --options runtime \
+      --entitlements "$ENT_INH" --sign "$IDENT" "{}"
+
+# ② 嵌套可执行文件（mpv / ffmpeg / ffprobe / aria2c / java / python3 …）
+find "$APP/Contents" -type f -perm -u+x ! -name '*.dylib' ! -name '*.so' ! -name '*.jar' -print0 \
+  | xargs -0 -n1 -I{} codesign --force --timestamp --options runtime \
+      --entitlements "$ENT_INH" --sign "$IDENT" "{}"
+
+# ③ 主应用本体（用主授权文件，注意不是 inherit 那份）
+codesign --force --timestamp --options runtime \
+  --entitlements "$ENT" --sign "$IDENT" "$APP"
+
+# ④ 校验
+codesign --verify --deep --strict --verbose=2 "$APP"
+spctl -a -vvv -t exec "$APP"
+```
+
+看到 `satisfies its Designated Requirement` 且 `spctl` 输出 `accepted` 即签名通过。
+
+> `--options runtime` = 开启 Hardened Runtime，**公证的硬性要求**，不能省。
+> `--timestamp` = 打时间戳，证书过期后已签的包仍有效。
+> 授权文件已在仓库里（`build/entitlements.mac.plist` / `build/entitlements.mac.inherit.plist`），
+> 里面开了 `allow-jit`、`allow-unsigned-executable-memory`、`disable-library-validation`
+> —— JVM 与 CPython 子进程的刚需，删掉会导致 java / py 蜘蛛启动即崩溃。
+
+### 5.4 重新打包 dmg / zip
+
+签名完 `.app` 后，原来的 dmg / zip 里还是未签名的副本，需要让 electron-builder 重打一次
+（它会复用已签名的 `.app`，或直接重跑构建）：
+
+```bash
+pnpm dist:mac
+```
+
+> 更简单省事的顺序其实是：**第 4 步构建完 → 先签名 `.app` → 再让 electron-builder 重打 dmg**。
+> 上面的脚本默认你已经在 `release*/` 里有 `.app` 了。
+
+---
+
+## 6. 去隔离属性（每台机器第一次打开前都该做）
+
+从网上下载的 `.app` / `.dmg` 会被打上 `com.apple.quarantine` 扩展属性，
+未公证的包因此被 Gatekeeper 拦下。清掉它：
+
+```bash
+xattr -cr /Applications/Win-Box.app
+# 或直接对 dmg 做（挂载前）：
+xattr -cr ~/Downloads/Win-Box-1.20.10-arm64.dmg
+```
+
+查看当前有哪些扩展属性：
+
+```bash
+xattr -l /Applications/Win-Box.app
+```
+
+---
+
+## 7. 公证（Apple 服务器扫毒，让所有人双击就能打开）
+
+### 7.1 存一次凭据（只需做一次）
+
+去 <https://appleid.apple.com> → 「App 专用密码」生成一个专用密码，然后：
+
+```bash
+xcrun notarytool store-credentials "winbox-notary" \
+  --apple-id "<你的 Apple ID 邮箱>" \
+  --team-id "<TEAMID1234>" \
+  --password "<刚生成的 App 专用密码>"
+```
+
+之后提交就不用再输密码了。
+
+### 7.2 提交 `.app` 公证
+
+```bash
+APP="$(find release* -maxdepth 3 -name 'Win-Box.app' | head -1)"
+ditto -c -k --keepParent "$APP" "Win-Box-notarize.zip"
+xcrun notarytool submit "Win-Box-notarize.zip" \
+  --keychain-profile "winbox-notary" --wait
+```
+
+成功输出 `status: Accepted`。失败会返回一个 Submission ID，用它看详细原因：
+
+```bash
+xcrun notarytool log <Submission-ID> --keychain-profile "winbox-notary"
+```
+
+### 7.3 装订票据（staple）
+
+```bash
+xcrun stapler staple "$APP"
+```
+
+### 7.4 重打 dmg 并公证 dmg 本体
+
+```bash
+pnpm dist:mac                                  # 重新生成 dmg / zip（内含已公证的 .app）
+xcrun notarytool submit "release<版本号>/Win-Box-<版本>-arm64.dmg" \
+  --keychain-profile "winbox-notary" --wait
+xcrun stapler staple "release<版本号>/Win-Box-<版本>-arm64.dmg"
+# x64 的同上再来一遍
+```
+
+### 7.5 最终验证（在一台干净的 Mac 上）
+
+```bash
+spctl -a -vvv -t open --no-cache "release<版本号>/Win-Box-<版本>-arm64.dmg"
+```
+
+输出含 `accepted` + `source=Notarized Developer ID` 即成功。
+
+---
+
+## 8. 没有 Apple Developer 账号怎么办（给用户看的操作步骤）
+
+没有账号 → 无法签名 / 无法公证 → 别人下载后双击会被 Gatekeeper 拦。
+**软件本身完全能跑**，只需要让用户手动放行一次。把下面这段原样发给用户（或放进 Release 说明里）：
+
+> ### 首次打开被系统拦截的处理办法
+>
+> 1. 正常双击 `Win-Box-<版本>-arm64.dmg`，把 `Win-Box` 图标**拖进「应用程序」文件夹**。
+> 2. **不要双击启动**。打开「访达」→「应用程序」，找到 `Win-Box`，
+>    在图标上**点右键（或按住 Control 点一下）→ 选「打开」**。
+> 3. 弹出对话框问「……来自身份不明的开发者，您确定要打开吗？」→ 点**「打开」**。
+> 4. 如果弹窗里没有「打开」按钮，或已经双击被拦过一次：
+>    打开 **系统设置 → 隐私与安全性 → 安全性** 那一栏，
+>    会看到一行「已阻止使用“Win-Box”，因为来自身份不明的开发者」，
+>    右边点**「仍要打开」**，再输一次开机密码确认。
+> 5. 之后就能正常双击启动了，**只需做一次**。
+
+补充命令版（给不怕终端的用户，等价于上面第 4 步）：
+
+```bash
+xattr -cr /Applications/Win-Box.app
+```
+
+> 开发者自己也可以做 **ad-hoc 自签**（`codesign --sign - --deep --force Win-Box.app`），
+> 它能让本机 `codesign --verify` 通过，但**不能**让 Gatekeeper 放行（没有可信根），
+> 所以仍需用户走上面的「右键 → 打开」。
+
+---
+
+## 9. 常见失败排查表
+
+| 现象 | 最可能的原因 | 处理 |
+| --- | --- | --- |
+| 「“Win-Box”已损坏，无法打开，您应该将它移到废纸篓」 | ① 未去隔离属性 ② 嵌套二进制未签名 | `xattr -cr /Applications/Win-Box.app`；按 5.3 递归重签 |
+| 「无法打开“Win-Box”，因为无法验证开发者」 | 没签名 / 没公证 | 走第 8 节「右键 → 打开」 |
+| 启动后立刻闪退、控制台显示 `SIGKILL` / `Code Signature Invalid` | Hardened Runtime 下 JIT / 未签名库被拒 | 确认授权文件含 `allow-jit` + `disable-library-validation`，并用 `--options runtime` 重签 |
+| java / py 蜘蛛起不来，报 `dyld: Library not loaded` | 嵌套 dylib 未签或路径失效 | 按 5.3 第 ① 步签所有 `.dylib` |
+| `codesign` 报 `code object is not signed at all` | 有嵌套项漏签（通常是 JRE 里新出现的） | `find "$APP/Contents" -type f -perm -u+x` 逐个补签 |
+| 公证被拒：`The executable does not have the hardened runtime enabled` | 少了 `--options runtime` | 重签并加该参数 |
+| 公证被拒：`The binary is not signed with a valid Developer ID certificate` | 用的是 Apple Development 证书而非 **Developer ID Application** | 换证书重签 |
+| 公证被拒：`invalid nested binary` / `bundle format unrecognized` | 有文件被塞进了不该放的位置（如 `__pycache__`、日志、`hs_err_pid*.log`） | 清掉 `.app` 内的运行时垃圾后重新打包（`package.json` 的 `files` 已排除，多半是你手动拷进去的） |
+| `Missing build/icon.icns` | 没生成图标 | `node scripts/make-icon.mjs` |
+| `pnpm dist:mac` 在 Windows 上报平台错误 | dmg 只能在 macOS 上打 | 换 Mac |
+| 更新器提示「未找到安装包」 | Release 资产命名不符合约定 | dmg 必须叫 `Win-Box-<版本>-arm64.dmg` / `Win-Box-<版本>-x64.dmg`（`upload-release.mjs` 只认这三个名字 + dmg/zip） |
+| 播放器黑屏 / 只有声音没有画面 | mpv `--wid` 嵌入在 macOS 上可能不生效（未真机验证项 V1） | 终端启动并设 `WINBOX_MAC_MPV_EMBED=0 /Applications/Win-Box.app/Contents/MacOS/Win-Box` 强制降级到 HTML5 / 外部播放器 |
+| 全屏后控制条错位 / 窗口边界回不来 | 透明窗 + 原生全屏（未真机验证项 V2） | 已知待验证项，暂用「退出全屏再重进」规避 |
+| 关掉所有窗口后 Dock 图标还在 / 代理还在跑 | macOS 设计如此（未真机验证项 V3） | 用 `Cmd+Q` 完全退出 |
+| 配置 / 数据找不到了 | macOS 上数据在 `~/Library/Application Support/Win-Box`（**不在 `.app` 里**，也不在安装包目录） | 用「访达 → 前往文件夹」粘贴该路径 |
+| 签名后一运行就报签名失效 | 程序往 `.app` 内部写了文件（破坏了密封） | 属于代码缺陷，请提 Issue；临时办法是重新签名 |
+| Xcode CLT 报 `xcode-select: error: tool 'notarytool' requires Xcode` | Xcode 版本过老 | `sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install`；或装 Xcode 15+ |
+
+---
+
+## 10. 需要真机验证的项（本次代码已留正确分支，但没在真机上跑过）
+
+打完包请**逐项实际点一遍**，有问题就提 Issue 或改代码：
+
+| # | 验证项 | 怎么验 | 出问题怎么办 |
+| --- | --- | --- | --- |
+| **V1** | **mpv `--wid` 能否嵌入 Electron 窗口**（最高风险） | 播一个普通视频，看播放器窗口里有没有画面 | 黑屏/无画面 → 环境变量 `WINBOX_MAC_MPV_EMBED=0` 强制降级（仅 HTML5 + 外部播放器）；确认长期不行就把默认值改 false |
+| **V2** | 透明播放器窗 + macOS 原生全屏 | 进全屏 / 退出全屏，看控制条与窗口边界 | 见排查表 |
+| **V3** | Dock 行为 | 关掉所有窗口后点 Dock 图标是否恢复；`Cmd+Q` 后图标是否消失 | 见排查表 |
+| **V4** | 标题栏 mac 变体（左置红黄绿三点） | 每个窗口看一眼，尤其播放器窗的「小窗口 / 置顶」按钮位置 | 记下截图提 Issue |
+| **V5** | 字体栈（4 套主题：apple / bilibili / douban / netflix） | 在 Retina 屏上看中文是否过细/字形不一致 | 调 `src/renderer/styles/*.css` 的 font-family 顺序 |
+| **V6** | JVM / Python 蜘蛛 | 导入一个 jar 蜘蛛和一个 py 蜘蛛，看能不能出搜索结果 | 不可用时应走「该源不可用」的人话降级，不应崩溃 |
+| **V7** | Gatekeeper / 公证 | 用一台**从未装过**的干净 Mac 双击 dmg | 见第 7、8 节 |
+| **V8** | `Cmd+W` / `Cmd+Q` / `Cmd+,` 快捷键 | 逐个按一遍 | `Cmd+,` 应跳到配置页 |
+
+---
+
+## 11. 发布流程（打完包之后）
+
+1. 在 GitHub 上**手动创建** Release，tag 名 = `release<版本号>`（与 Windows 共用同一个 Release）。
+2. 上传附件（脚本只挑 `.exe` 与 `.dmg`，不会上传 blockmap 或构建元数据）：
+
+   ```bash
+   pnpm run release:upload -- --dry-run   # 先预览会上传哪些文件
+   pnpm run release:upload                # 真正上传
+   ```
+
+3. **资产命名必须严格一致**，否则更新器挑不到：
+
+   ```
+   Win-Box Setup <版本>.exe        ← Windows（NSIS）
+   Win-Box-<版本>-arm64.dmg        ← macOS Apple Silicon
+   Win-Box-<版本>-x64.dmg          ← macOS Intel
+   ```
+
+4. 更新器在 macOS 上的行为：检测到新版本 → 代理加速下载 dmg → **自动打开 dmg**
+   → 提示「请在访达中将 Win-Box 拖入「应用程序」文件夹覆盖安装」。
+   **不做静默替换**（未接入 Sparkle），用户仍需手动拖一次。
+
+> 上传脚本默认走本机 `127.0.0.1:7897` 代理；用 `GH_UPLOAD_PROXY=direct` 可强制直连。
+> 详见 `README.md` 的「发布附件」一节。
+
+---
+
+## 12. 附：环境变量速查
+
+| 变量 | 作用 |
+| --- | --- |
+| `WINBOX_SUPPORT_IMAGE` | 指定赞助图原图路径（默认找 `src/renderer/assets/author-support.png`） |
+| `WINBOX_GROUP_IMAGE` | 指定群二维码原图路径 |
+| `WINBOX_MAC_MPV_EMBED=0` | **macOS 上强制关闭 mpv 窗口嵌入**，降级到 HTML5 / 外部播放器 |
+| `GH_UPLOAD_PROXY` | Release 上传走哪个代理；`direct` / `none` = 直连 |

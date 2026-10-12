@@ -8,13 +8,14 @@
 // 单会话是刻意的：同一时刻只有「独立播放器窗口」的一个 mpv（换集 = stop + start 新进程）。
 import { spawn, type ChildProcess } from 'node:child_process';
 import { connect, type Socket } from 'node:net';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrowserWindow } from 'electron';
 import type { Logger } from '../../shared/types';
 import type { MpvCommand, MpvKernelState, MpvStartOptions, MpvStatus } from '../../shared/player';
 import { IPC } from '../../shared/ipc-channels';
 import { cacheDir, resourcesDir } from '../util/paths';
+import { exeName, isWin, mpvEmbedSupported, mpvIpcPath, spawnOptions } from '../../shared/platform';
 import { playerSettings } from './playerSettings';
 import { playerIsFullscreen, playerIsMini } from './PlayerWindow';
 import {
@@ -34,7 +35,10 @@ const CONNECT_TIMEOUT_MS = 6000;
 /** quit 后的强杀宽限 */
 const QUIT_GRACE_MS = 1500;
 
-/** 取窗口 HWND（Windows 指针宽度的十进制字符串，mpv `--wid` 接受十进制 int64） */
+/**
+ * 取原生窗口句柄（win32 = HWND / macOS = NSView 指针）的十进制字符串
+ * （mpv `--wid` 接受十进制 int64；`getNativeWindowHandle()` 在两个平台都返回 Buffer，取值口径一致）。
+ */
 export function hwndOf(win: BrowserWindow): string {
   try {
     const buf = win.getNativeWindowHandle();
@@ -44,6 +48,9 @@ export function hwndOf(win: BrowserWindow): string {
     return '';
   }
 }
+
+/** ★ 2026-10-12（macOS 适配 §3.8-1）：语义化别名（同一实现，两处名字都留着，避免改动既有调用点） */
+export const nativeWindowIdOf = hwndOf;
 
 export class MpvController {
   private proc: ChildProcess | null = null;
@@ -65,18 +72,31 @@ export class MpvController {
   private unbindViewport: (() => void) | null = null;
   /** 本次会话是否已挂上外挂字幕（换字幕前先 sub-remove） */
   private subOn = false;
+  /**
+   * ★ 2026-10-12（风险 R1 缓解）：上一次「嵌入尝试」是否失败（进程内一次性）。
+   *   darwin 的 `--wid` 能否嵌进 NSView **未经真机验证** —— 一旦 JSON IPC 在超时内连不上
+   *   （多半是 `--wid` 导致 mpv 起不来），就置位并让 `status().embeddable` 转 false，
+   *   渲染层下次不再给 MPV 入口。**不阻塞 HTML5 / 外部播放器链路**。
+   */
+  private embedFailed = false;
 
   constructor(private log: Logger) {}
 
   /** mpv 可用性与路径（配置覆盖 → 随包内置 → 本机探测） */
   status(): MpvStatus {
-    const bundled = join(resourcesDir(), 'mpv', 'mpv.exe');
+    // ★ 2026-10-12（macOS 适配 P0-4）：可执行名平台化（darwin 上没有 `.exe`）。
+    //   Windows 下 `exeName('mpv')` === 'mpv.exe'，与改动前逐字节相同。
+    const bundled = join(resourcesDir(), 'mpv', exeName('mpv'));
     const r = resolveMpvPath({
       override: playerSettings.settings.mpvPath,
       bundled,
       env: process.env,
       exists: existsSync,
     });
+    // ★ 2026-10-12（风险 R1）：`--wid` 嵌入能力开关（win32 恒 true；darwin 可用环境变量关，
+    //   或运行时 IPC 连不上 → `embedFailed` 自动降级）。不可嵌入时给中文人话提示，
+    //   引导用户走外部播放器（绝不静默失败）。
+    const embeddable = mpvEmbedSupported(process.env) && !this.embedFailed;
     const note =
       r.source === 'override'
         ? '使用自定义路径'
@@ -84,8 +104,16 @@ export class MpvController {
           ? '使用随包内置构建（安装目录内）'
           : r.source === 'system'
             ? '使用本机已安装的 mpv'
-            : '未找到 mpv：随包构建缺失且本机未安装（可在配置页「播放」指定 mpv.exe 路径）';
-    return { available: r.source !== 'none', path: r.path, source: r.source, note };
+            : `未找到 mpv：随包构建缺失且本机未安装（可在配置页「播放」指定 ${exeName('mpv')} 路径）`;
+    return {
+      available: r.source !== 'none',
+      path: r.path,
+      source: r.source,
+      note: !embeddable && r.source !== 'none'
+        ? `${note}；当前环境不支持把 mpv 嵌入播放窗口，已改用内置 HTML5 内核（如需 mpv 画面请用外部播放器）`
+        : note,
+      embeddable,
+    };
   }
 
   get running(): boolean {
@@ -126,9 +154,20 @@ export class MpvController {
     this.subOn = false;
     this.lineBuf = '';
 
+    // ★ 2026-10-12（macOS 适配 §3.8-5）：不可嵌入时不需要 wid（mpv 走独立窗口）。
+    const embed = mpvEmbedSupported(process.env);
     const hwnd = hwndOf(win);
-    if (!hwnd) throw new Error('无法取得播放器窗口句柄（mpv 无法嵌入）');
-    const pipe = `\\\\.\\pipe\\winbox-mpv-${process.pid}-${++this.pipeSeq}-${Date.now().toString(36)}`;
+    if (embed && !hwnd) throw new Error('无法取得播放器窗口句柄（mpv 无法嵌入）');
+    // ★ 2026-10-12（macOS 适配 §3.8-3）：win32 命名管道 / darwin unix socket，统一由 platform 层给。
+    const pipe = mpvIpcPath({ pid: process.pid, seq: ++this.pipeSeq, nonce: Date.now().toString(36) });
+    // darwin：清理上次崩溃残留的 socket 文件（残留会让 mpv 的 bind 失败 → 建连超时 → 假性"嵌入不可用"）
+    if (!isWin()) {
+      try {
+        rmSync(pipe, { force: true });
+      } catch {
+        /* 本来就不存在 / 无权限 → 忽略 */
+      }
+    }
     const args = buildMpvArgs({
       pipe,
       wid: hwnd,
@@ -136,9 +175,11 @@ export class MpvController {
       volume: opts.volume ?? 1,
       rate: opts.rate ?? 1,
       fit: opts.fit,
+      env: process.env,
     });
     this.log.i(`mpv: 启动（session=${session}，${st.note}）→ ${url.slice(0, 120)}`);
-    const proc = spawn(st.path, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    // ★ 2026-10-12：spawn 选项平台化（win32 `windowsHide:true`；darwin 只留 stdio，行为不变）
+    const proc = spawn(st.path, args, { ...spawnOptions(), stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc = proc;
     proc.on('error', (e) => {
       this.log.w(`mpv: 进程错误 ${e.message}`);
@@ -159,7 +200,18 @@ export class MpvController {
 
     let sock: Socket;
     try { sock = await this.connectPipe(pipe, CONNECT_TIMEOUT_MS); }
-    catch (e) { if (proc === this.proc) this.stop(); throw e; }
+    catch (e) {
+      if (proc === this.proc) this.stop();
+      // ★ 风险 R1 缓解：连不上多半是 `--wid` 让 mpv 起不来（darwin 未验证）→ 标记嵌入失败并降级，
+      //   绝不把整条播放链路挂死（渲染层下次走 HTML5 / 外部播放器）。
+      if (embed) {
+        this.embedFailed = true;
+        this.log.w(`mpv: 嵌入窗口失败（已降级为独立窗口/HTML5 内核）：${(e as Error)?.message || e}`);
+      }
+      throw isWin()
+        ? e
+        : new Error(`mpv 无法嵌入播放窗口（已改用内置 HTML5 内核，或用外部播放器）：${String((e as Error)?.message || e)}`);
+    }
     // 连接期间可能已被 stop/换集 → 丢弃这条管道
     if (session !== this.session || proc !== this.proc) {
       try {

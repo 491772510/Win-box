@@ -16,6 +16,8 @@
     "start": "electron .",
     "pack": "npm run build && electron-builder --dir",
     "dist": "node scripts/build-release.mjs",
+    "dist:mac": "node scripts/build-release.mjs --mac",
+    "icon:mac": "node scripts/make-icon.mjs",
     "release:upload": "node scripts/upload-release.mjs"
   },
   "author": "Win-Box",
@@ -78,6 +80,50 @@
       "target": [
         "nsis"
       ]
+    },
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.video",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "darkModeSupport": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ],
+      "window": {
+        "width": 540,
+        "height": 380
+      }
     },
     "nsis": {
       "differentialPackage": false,

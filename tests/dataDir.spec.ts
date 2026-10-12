@@ -35,8 +35,11 @@ describe('dataDir — planDataDir（目标目录决策）', () => {
     expect(p.target).toBe(p.legacy);
   });
 
+  // ★ 2026-10-12：打包态用例一律**显式钉死 platform:'win32'** ——
+  //   `platformName()` 会读进程级全局 `WINBOX_TEST_PLATFORM`（并行 spec 可能写 darwin），
+  //   依赖「环境默认值」会随机失败；钉死后与主机、与并行注入都无关。
   it('安装版：目标 = exe 所在目录/data', () => {
-    const p = planDataDir({ isPackaged: true, exePath: 'D:/Games/Win-Box/Win-Box.exe', defaultUserData: 'C:/Users/u/AppData/Roaming/win-box' });
+    const p = planDataDir({ isPackaged: true, platform: 'win32', exePath: 'D:/Games/Win-Box/Win-Box.exe', defaultUserData: 'C:/Users/u/AppData/Roaming/win-box' });
     expect(p.activate).toBe(true);
     expect(samePath(p.target, 'D:/Games/Win-Box/data')).toBe(true);
     expect(samePath(p.legacy, 'C:/Users/u/AppData/Roaming/win-box')).toBe(true);
@@ -45,11 +48,59 @@ describe('dataDir — planDataDir（目标目录决策）', () => {
   it('便携版：优先 PORTABLE_EXECUTABLE_DIR（portable exe 真实所在目录，而非临时解压目录）', () => {
     const p = planDataDir({
       isPackaged: true,
+      platform: 'win32',
       exePath: 'C:/Users/u/AppData/Local/Temp/abc123/Win-Box.exe',
       portableExecutableDir: 'E:/Tools/Win-Box',
       defaultUserData: 'C:/Users/u/AppData/Roaming/win-box',
     });
     expect(samePath(p.target, 'E:/Tools/Win-Box/data')).toBe(true);
+  });
+
+  // ★ 2026-10-12（macOS 适配 P0-8）：darwin **绝不搬运** —— 写进 `.app` 内部会破坏签名密封。
+  it('★ darwin：打包态也不搬运（activate=false，target===legacy）', () => {
+    const p = planDataDir({
+      isPackaged: true,
+      platform: 'darwin',
+      exePath: '/Applications/Win-Box.app/Contents/MacOS/Win-Box',
+      defaultUserData: '/Users/u/Library/Application Support/Win-Box',
+    });
+    expect(p.activate).toBe(false);
+    expect(p.target).toBe(p.legacy);
+  });
+
+  it('★ darwin：target 绝不含 .app（写进 .app 会破坏签名密封 → Gatekeeper 判「已损坏」）', () => {
+    const p = planDataDir({
+      isPackaged: true,
+      platform: 'darwin',
+      exePath: '/Applications/Win-Box.app/Contents/MacOS/Win-Box',
+      defaultUserData: '/Users/u/Library/Application Support/Win-Box',
+    });
+    expect(p.target.includes('.app')).toBe(false);
+    expect(p.target).toBe('/Users/u/Library/Application Support/Win-Box');
+  });
+
+  it('★ darwin：即便给了 PORTABLE_EXECUTABLE_DIR 也不搬运', () => {
+    const p = planDataDir({
+      isPackaged: true,
+      platform: 'darwin',
+      exePath: '/Applications/Win-Box.app/Contents/MacOS/Win-Box',
+      portableExecutableDir: '/Users/u/Downloads/Win-Box',
+      defaultUserData: '/Users/u/Library/Application Support/Win-Box',
+    });
+    expect(p.activate).toBe(false);
+    expect(p.target).toBe('/Users/u/Library/Application Support/Win-Box');
+  });
+
+  it('★ win32：显式传 platform 与缺省行为一致（零回归）', () => {
+    const args = {
+      isPackaged: true,
+      exePath: 'D:/Games/Win-Box/Win-Box.exe',
+      defaultUserData: 'C:/Users/u/AppData/Roaming/win-box',
+    };
+    const a = planDataDir(args);
+    const b = planDataDir({ ...args, platform: 'win32' });
+    expect(a).toEqual(b);
+    expect(a.activate).toBe(true);
   });
 });
 

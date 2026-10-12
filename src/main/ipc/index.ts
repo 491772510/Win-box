@@ -19,6 +19,7 @@ import { clearAppCache } from '../util/cacheClean';
 import { nameFromLocalFile } from '../util/importNaming';
 import { join, basename } from 'node:path';
 import { IPC } from '../../shared/ipc-channels';
+import { platformName, shouldQuitAfterLaunchingInstaller } from '../../shared/platform';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import { parseLive } from '../../engine/config/LiveConfigParser';
 import { localLiveUrl, looksLikeLiveSourceText, sanitizeLiveFileName } from '../../engine/live/localLive';
@@ -133,6 +134,12 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
     reason: dataDirReport.reason,
     migration: dataDirReport.migration,
   }), log);
+  /**
+   * ★ 2026-10-12（macOS 适配 P1-2 前提）：归一化平台名（`'win32' | 'darwin' | 'linux'`）。
+   *   渲染层据此切换 TitleBar 变体 / 文案；渲染层不直接读 `process.platform`
+   *   （Vite 打包后语义不可靠），一律经本通道拿主进程的真值。
+   */
+  registerHandler(IPC.WB_APP_PLATFORM, () => ({ platform: platformName() }), log);
 
   registerHandler(IPC.CONFIG_IMPORT, async (e: any, args: { url?: string; json?: string; name?: string }) => {
     const r = await host.importConfig(args || {});
@@ -676,9 +683,19 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
     if (!path) throw new Error('安装包不存在，请重新下载');
     const r = await updater.launch(path);
     if (!r.ok) throw new Error(r.error || '无法启动安装程序');
-    // 拉起安装程序后退出本程序，避免占用安装目录文件（NSIS 才能覆盖安装）
-    setTimeout(() => app.quit(), 1500);
-    return { ok: true, path };
+    /**
+     * ★ 2026-10-12（macOS 适配）：**按平台决定是否退出**。
+     *   - win32（现状，一字不动）：拉起安装程序后 1.5s 退出本程序，
+     *     避免占用安装目录文件 —— NSIS 覆盖安装必须独占，不退就装不上；
+     *   - darwin：**不退出**。`shell.openPath(dmg)` 只是挂载镜像，本程序占用与否无关；
+     *     退出反而会让用户只剩 1.5 秒看到「请把 Win-Box 拖入应用程序」的引导提示。
+     *     返回值带上 `hint`（UpdateService 在 darwin 下给的拖拽引导文案），渲染层据此提示。
+     */
+    if (shouldQuitAfterLaunchingInstaller()) {
+      setTimeout(() => app.quit(), 1500);
+      return { ok: true, path };
+    }
+    return { ok: true, path, ...(r.hint ? { hint: r.hint } : {}) };
   }, log);
 
   registerHandler(IPC.LIVE_LOAD, (_e: any, index: number) => host.loadLive(index), log);

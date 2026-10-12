@@ -22,7 +22,16 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { resourcesDir, cacheDir } from '../util/paths';
+import { probeTool } from '../util/toolProbe';
 import type { Logger } from '../../shared/types';
+import {
+  exeName,
+  isWin,
+  platformName,
+  spawnOptions,
+  type PlatformName,
+  type ToolProbeResult,
+} from '../../shared/platform';
 
 /** aria2 `getFiles` 条目（数值字段 JSON 里是**字符串**） */
 export interface Aria2FileRaw {
@@ -51,6 +60,9 @@ export interface Aria2Status {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** dispose 后强杀（SIGKILL）兜底宽限：darwin 没有 `--stop-with-process`，只能靠 kill */
+const KILL_GRACE_MS = 1500;
+
 /** 取一个空闲端口（aria2 RPC 只监听 127.0.0.1） */
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -64,8 +76,20 @@ function freePort(): Promise<number> {
   });
 }
 
-/** aria2c 命令行（导出供单测/排障对拍：参数写错会静默劣化体验，值得锁死） */
-export function aria2Args(port: number, secret: string, dir: string, stopWithPid?: number): string[] {
+/**
+ * aria2c 命令行（导出供单测/排障对拍：参数写错会静默劣化体验，值得锁死）
+ *
+ * @param stopWithPid 传了 pid **且**平台是 win32 才带 `--stop-with-process`
+ *   （★ 该参数是 **Windows 专有**；darwin/linux 传了会被 aria2 拒绝 → 引擎根本起不来）。
+ *   既有调用点已经只在 win32 传 pid，这里再加一道平台闸，双保险、行为不变。
+ */
+export function aria2Args(
+  port: number,
+  secret: string,
+  dir: string,
+  stopWithPid?: number,
+  platform: PlatformName = platformName(),
+): string[] {
   return [
     // ★ 绝不读用户的 aria2.conf：外部配置可能把 dir/端口/限速带偏，甚至与本进程抢端口
     '--no-conf=true',
@@ -98,8 +122,9 @@ export function aria2Args(port: number, secret: string, dir: string, stopWithPid
     '--log-level=error',
     '--summary-interval=0',
     '--quiet=true',
-    // ★ Windows 专有：本进程退（含被强杀）→ aria2c 自行退出，不留孤儿
-    ...(stopWithPid ? [`--stop-with-process=${stopWithPid}`] : []),
+    // ★ Windows 专有：本进程退（含被强杀）→ aria2c 自行退出，不留孤儿。
+    //   darwin/linux 上该参数不存在，传了 aria2 直接报错退出 → 必须按平台闸住。
+    ...(stopWithPid && isWin(platform) ? [`--stop-with-process=${stopWithPid}`] : []),
   ];
 }
 
@@ -115,15 +140,36 @@ export class Aria2Sidecar {
     this.dir = join(cacheDir(), 'bt');
   }
 
-  /** aria2c 可执行文件位置（dev = 仓库 resources/aria2；打包 = process.resourcesPath/aria2） */
-  static exePath(): string {
-    return join(resourcesDir(), 'aria2', 'aria2c.exe');
+  /**
+   * 随包内置的 aria2c 位置（dev = 仓库 resources/aria2；打包 = process.resourcesPath/aria2）。
+   * ★ 2026-10-12（macOS 适配 §3.10）：可执行名平台化 —— win32 `aria2c.exe`（与改动前逐字节相同），
+   *   darwin/linux `aria2c`（macOS 上不存在 `.exe` 后缀，写死会让探测永远为「缺失」）。
+   */
+  static exePath(p: PlatformName = platformName()): string {
+    return join(resourcesDir(), 'aria2', exeName('aria2c', p));
+  }
+
+  /**
+   * ★ 2026-10-12（macOS 适配 §3.10）：aria2c 解析链（**用户覆盖 → 随包内置 → 本机探测**）。
+   *   - win32：随包内置 `resources/aria2/aria2c.exe`（现状，逐字节不变）；
+   *   - darwin：随包内置 `resources/aria2/aria2c` → Homebrew（`/opt/homebrew/bin`）→
+   *     `/usr/local/bin` → `/usr/bin` → PATH；缺失时 hint 含 `brew install aria2`。
+   *   与 `exePath()` 自洽：`exePath()` 就是这里的 `bundled` 候选，探测顺序第一顺位的完整路径。
+   */
+  static resolveExe(p: PlatformName = platformName()): ToolProbeResult {
+    return probeTool({
+      tool: 'aria2c',
+      bundled: Aria2Sidecar.exePath(p),
+      platform: p,
+      env: process.env,
+      exists: existsSync,
+    });
   }
 
   /** 引擎文件是否就位（缺文件时上层给「未内置 BT 引擎」的人话提示，而不是空等超时） */
   available(): boolean {
     try {
-      return existsSync(Aria2Sidecar.exePath());
+      return !!Aria2Sidecar.resolveExe().path;
     } catch {
       return false;
     }
@@ -142,17 +188,25 @@ export class Aria2Sidecar {
   }
 
   private async start(): Promise<boolean> {
-    const exe = Aria2Sidecar.exePath();
-    if (!existsSync(exe)) {
-      this.logger.w(`BT 引擎缺失：${exe}（磁力播放不可用，将回落到「复制链接」提示）`);
+    // ★ 2026-10-12：随包内置优先、本机（Homebrew / PATH）兜底；缺失时日志带人话修复指引。
+    const probe = Aria2Sidecar.resolveExe();
+    const exe = probe.path;
+    if (!exe) {
+      this.logger.w(`BT 引擎缺失：${Aria2Sidecar.exePath()}（磁力播放不可用，将回落到「复制链接」提示）。${probe.hint}`);
       return false;
     }
     try {
       mkdirSync(this.dir, { recursive: true });
       this.port = await freePort();
       this.secret = randomBytes(12).toString('hex');
-      const args = aria2Args(this.port, this.secret, this.dir, process.platform === 'win32' ? process.pid : undefined);
-      const proc = spawn(exe, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+      // ★ `--stop-with-process` 仅 win32 需要/可用（见 aria2Args 注释）；darwin 靠 dispose 的 kill 收口。
+      const args = aria2Args(
+        this.port,
+        this.secret,
+        this.dir,
+        isWin() ? process.pid : undefined,
+      );
+      const proc = spawn(exe, args, { ...spawnOptions(), stdio: ['ignore', 'ignore', 'pipe'] });
       proc.stderr?.on('data', (b: Buffer) => {
         const line = b.toString('utf-8').trim();
         if (line) this.logger.w(`[aria2] ${line.slice(0, 300)}`);
@@ -231,13 +285,30 @@ export class Aria2Sidecar {
     }
   }
 
-  /** 退出清理：杀进程（`--stop-with-process` 是第二重保险） */
+  /**
+   * 退出清理：杀进程。
+   *   - win32：`kill()` 即终止；`--stop-with-process` 是第二重保险（应用被强杀时也不留孤儿）；
+   *   - darwin/linux：**没有** `--stop-with-process`，退出完全靠这里 —— 先 SIGTERM（`kill()`），
+   *     `KILL_GRACE_MS` 后仍未退出则 SIGKILL 兜底（避免 aria2c 挂在磁盘 IO 上不肯走）。
+   */
   dispose(): void {
     const proc = this.proc;
     this.proc = undefined;
     this.port = 0;
     this.secret = '';
     if (!proc) return;
+    const hardKill = setTimeout(() => {
+      try {
+        // win32 上不存在真正的信号语义（一律 TerminateProcess）；非 win32 才发 SIGKILL。
+        if (isWin()) proc.kill();
+        else proc.kill('SIGKILL');
+      } catch {
+        /* ignore */
+      }
+    }, KILL_GRACE_MS);
+    // 别让这个兜底定时器把应用退出拖住 1.5s
+    hardKill.unref?.();
+    proc.once('exit', () => clearTimeout(hardKill));
     try {
       proc.kill();
     } catch {

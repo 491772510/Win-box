@@ -80,6 +80,14 @@ export interface MpvStatus {
   source: 'override' | 'bundled' | 'system' | 'none';
   /** 人话说明（配置页/播放器提示用） */
   note: string;
+  /**
+   * ★ 2026-10-12（macOS 适配 P0-4 / 风险 R1）：mpv 能否用 `--wid` **嵌进**播放窗口。
+   *   - win32：恒 `true`（既有行为，已实测可用）；
+   *   - darwin：默认 true（先尝试），`WINBOX_MAC_MPV_EMBED=0` 或运行时连接失败 → false
+   *     → 渲染层隐藏 MPV 入口、改用 HTML5 / 外部播放器（**不阻塞整条链路**）。
+   *   ★★ 渲染层判定 MPV 可用性必须写 `available && embeddable`，不得只用 `available`。
+   */
+  embeddable: boolean;
 }
 
 /** 启动一次 mpv 会话（每次换集/换源 = 新会话；主进程先停旧进程） */

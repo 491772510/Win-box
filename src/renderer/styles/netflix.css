@@ -44,7 +44,7 @@
 /* ---- 全局：纯黑舞台 + Netflix Sans 回退栈（UI 不抢内容） ---- */
 :root[data-theme='netflix'] body {
   background: #141414;
-  font-family: "Netflix Sans", "Helvetica Neue", "Segoe UI", "Microsoft YaHei", Roboto, Arial, sans-serif;
+  font-family: "Netflix Sans", "Helvetica Neue", "PingFang SC", "Segoe UI", "Microsoft YaHei", Roboto, Arial, sans-serif;
   letter-spacing: .012em;
 }
 :root[data-theme='netflix'] a { color: #fff; }
