@@ -235,7 +235,31 @@ public class Context {
 
     // ---------------- 组件启动（桌面版空实现） ----------------
 
+    /**
+     * ★ 2026-10-13 新增：源侧「重启 app」信令前缀。
+     * 宿主 `JarSpiderBridge.extractBridgeNotes` 认得它 → 转成 Electron 的 app.relaunch()+quit()。
+     * 格式固定为「前缀 + 空格 + 原因」，宿主按前缀匹配，不要改动前缀本身。
+     */
+    public static final String WINBOX_RESTART_MARK = "[winbox] app-restart-request";
+
+    /**
+     * ★★ 2026-10-13：「恢复配置后自动重启」在桌面端真正生效 ★★
+     *
+     * <p>桌面端没有 Activity 栈，绝大多数 {@code startActivity}（打开网页、拨号、跳应用）
+     * 本就该被无声丢弃。**唯一例外是「重启 app」**：加固壳（wex）用
+     * {@code getLaunchIntentForPackage()} + {@code startActivity()} + {@code killProcess()} 三步重启，
+     * 而桌面端前两步此前分别是「签名不符抛 NoSuchMethodError」与「空实现」——
+     * 用户侧现象就是「网页上写着『恢复后 app 会自动重启』，实际一动不动」。
+     *
+     * <p>现在：带 {@link PackageManager#WINBOX_LAUNCH_ACTION} 标记的 Intent 不再被丢弃，
+     * 而是转成一条 **stderr 信令**交给宿主（stderr 是宿主逐行实时消费的既有通道，
+     * 与 {@code [native-bridge]} / {@code [SpiderRunner]} 同款约定）。
+     * 其余 startActivity 保持空实现。
+     */
     public void startActivity(Intent intent) {
+        if (intent != null && PackageManager.WINBOX_LAUNCH_ACTION.equals(intent.getAction())) {
+            System.err.println(WINBOX_RESTART_MARK + " (源侧恢复配置后请求重启应用)");
+        }
     }
 
     public void startActivity(Intent intent, android.os.Bundle options) {

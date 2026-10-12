@@ -52,4 +52,39 @@ public class Activity extends android.content.Context {
      */
     public void requestPermissions(String[] permissions, int requestCode) {
     }
+
+    /**
+     * ★★ 2026-10-13：「恢复配置后自动重启」链路修复（**链条上最靠前的断点**）★★
+     *
+     * <p>实证（wex 字节码 owner 扫描 + 运行期复现）：`InitOrigin.activity()` 第一行就是
+     * <pre>
+     *   Activity a = InitOrigin.get().d;
+     *   if (a != null &amp;&amp; !a.isFinishing()) return a;   // ← 桩里没有 isFinishing()
+     * </pre>
+     * 缺它 → {@code NoSuchMethodError: 'boolean android.app.Activity.isFinishing()'} →
+     * `InitOrigin.activity()` 直接抛；而 `x0.e.v0()`（重启 app）第二行就调它 →
+     * <b>整条重启链在第一步就断了</b>（比 PackageManager 那两处更早）。
+     * 现象：网页写着「恢复后 app 会自动重启」，实际连 startActivity 都到不了。
+     *
+     * <p>语义选择：桌面没有 Activity 栈，恒「未结束 / 未销毁」（false = 仍然可用）。
+     * 若返回 true，`InitOrigin` 会判定当前 Activity 失效而去反射 `ActivityThread.mActivities`
+     * 找新的 —— 桌面那个 Map 是空的 → 反而拿到 null，把 v0() 推进提前 return 分支。
+     *
+     * <p>同一批补齐的还有 {@link #isDestroyed()} 与 {@link #findViewById(int)}：
+     * wex 分别引用 2 次 / 1 次（见 `tools` 扫描结论），属同一条 UI 适配链，
+     * 缺任何一个都会以 NoSuchMethodError 的形式在恢复流程里炸掉。
+     */
+    public boolean isFinishing() {
+        return false;
+    }
+
+    /** 桌面无 Activity 栈 → 永远「未销毁」。语义理由同 {@link #isFinishing()}。 */
+    public boolean isDestroyed() {
+        return false;
+    }
+
+    /** AOSP：找不到返回 null（调用方按 null 处理）。桌面无视图树 → 恒 null。 */
+    public android.view.View findViewById(int id) {
+        return null;
+    }
 }
