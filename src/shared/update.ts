@@ -283,6 +283,47 @@ export function isUpdateAvailable(local: string, remote: string): boolean {
   return compareVersions(remote, local) > 0;
 }
 
+/** 逃生舱环境变量名（存在且为真值时，开发模式也照常检查更新，便于调试更新流程） */
+export const FORCE_UPDATE_CHECK_ENV = 'WINBOX_FORCE_UPDATE_CHECK';
+
+/**
+ * ★ 2026-10-12（用户要求「开发模式跳过启动强制更新」）：是否跳过启动强制更新检查的判定入参。
+ *   - `isPackaged`：是否为打包后的正式安装包（= 主进程 `app.isPackaged`）；开发模式（`electron .`）为 false。
+ *   - `forceCheck`：逃生舱是否开启（= `envForcesUpdateCheck(process.env)`）。
+ */
+export interface SkipUpdateCheckOptions {
+  isPackaged: boolean;
+  forceCheck: boolean;
+}
+
+/**
+ * ★ 2026-10-12：是否需要**跳过**启动强制更新检查（纯函数，零 electron / 零 fs，便于单测）。
+ *
+ * 动机：开发模式（`app.isPackaged === false`，即 `electron .` / `npm run dev`）不应在启动时
+ *   被全屏遮罩锁死、自动下载并拉起安装程序 —— 那会打断调试、且极易误触发（实测一次 dev 就
+ *   自动下载安装了官方包）。故：
+ *   ① **正式安装包（isPackaged === true）恒不跳过** —— 硬约束：已发布版本的更新行为零变更。
+ *   ② 开发模式默认**跳过**（返回 true，放行界面）。
+ *   ③ 逃生舱：`forceCheck === true` 时开发模式也**不跳过**（便于开发者验证更新流程）。
+ */
+export function shouldSkipUpdateCheck(o: SkipUpdateCheckOptions): boolean {
+  // ① 正式安装包恒不跳过（已发布版本行为零变更）
+  if (o.isPackaged) return false;
+  // ② 开发模式：默认跳过；③ 逃生舱开启则不跳过
+  return !o.forceCheck;
+}
+
+/**
+ * ★ 2026-10-12：从环境变量记录里判断逃生舱 `WINBOX_FORCE_UPDATE_CHECK` 是否开启
+ *   （纯函数，便于单测；把 `process.env` 当普通记录传入即可）。接受 `1/true/yes/on`（大小写不敏感）。
+ */
+export function envForcesUpdateCheck(env: Record<string, string | undefined>): boolean {
+  const v = String(env?.[FORCE_UPDATE_CHECK_ENV] ?? '')
+    .trim()
+    .toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
 /** 原始 GitHub 地址 → 加速地址列表（前缀顺序 + 直连兜底，去重） */
 export function buildAccelUrls(url: string, prefixes: string[] = GH_ACCEL_PREFIXES): string[] {
   const raw = (url || '').trim();

@@ -20,11 +20,13 @@ import {
   GH_ACCEL_PREFIXES,
   UPDATE_RELEASES_API,
   buildAccelUrls,
+  envForcesUpdateCheck,
   isUpdateAvailable,
   parseLatestRelease,
   pickInstallerAsset,
   rankBySpeed,
   sampleBps,
+  shouldSkipUpdateCheck,
   type InstallerPlatform,
   type ReleaseJson,
   type SpeedSample,
@@ -77,10 +79,21 @@ export class UpdateService {
    * 检查更新。**任何失败都返回 updateAvailable=false**（不锁死软件），并带上 error 说明。
    * updateAvailable=true 的条件：远端版本更高 **且** 找到 Setup 安装包。
    * ★ 2026-09-30：候选地址（代理优先 + 直连）**并发抢首响**，第一个 200 即用，其余立即放弃。
+   * ★ 2026-10-12：开发模式（`app.isPackaged === false`）默认**跳过**（直接返回 updateAvailable=false），
+   *   逃生舱 `WINBOX_FORCE_UPDATE_CHECK=1` 可放行；正式安装包行为不变（判定见 `shouldSkipUpdateCheck`）。
    */
   async check(): Promise<UpdateCheckResult> {
     const localVersion = app.getVersion();
     const base: UpdateCheckResult = { localVersion, remoteVersion: '', tag: '', updateAvailable: false };
+
+    // ★ 2026-10-12（用户要求「开发模式跳过强制更新」）：未打包（`electron .` / `npm run dev`）时
+    //   默认**跳过启动强制更新**，避免界面被全屏遮罩锁死、自动下载并拉起官方安装包。
+    //   逃生舱：WINBOX_FORCE_UPDATE_CHECK=1 时开发模式也照常检查（便于验证更新流程）。
+    //   红线：正式安装包（app.isPackaged === true）行为**零变更**。
+    if (shouldSkipUpdateCheck({ isPackaged: app.isPackaged, forceCheck: envForcesUpdateCheck(process.env) })) {
+      this.log.i('更新检查：开发模式（未打包）跳过强制更新检查（如需测试更新流程，请设 WINBOX_FORCE_UPDATE_CHECK=1）');
+      return base;
+    }
 
     const { json, lastErr } = await this.fetchLatestRelease();
     if (!json) {

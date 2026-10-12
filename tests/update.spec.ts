@@ -3,10 +3,12 @@
 // Setup 安装包挑选、Release JSON 解析、字节格式化。零 Electron 依赖。
 import { describe, expect, it } from 'vitest';
 import {
+  FORCE_UPDATE_CHECK_ENV,
   GH_ACCEL_PREFIXES,
   UPDATE_RELEASES_API,
   buildAccelUrls,
   compareVersions,
+  envForcesUpdateCheck,
   formatBytes,
   isUpdateAvailable,
   normalizeVersion,
@@ -16,6 +18,7 @@ import {
   pickSetupAsset,
   rankBySpeed,
   sampleBps,
+  shouldSkipUpdateCheck,
   type ReleaseAssetInput,
   type SpeedSample,
 } from '../src/shared/update';
@@ -119,6 +122,38 @@ describe('isUpdateAvailable', () => {
     // 远端版本解析不出来 → 绝不判定为有更新（避免误锁死软件）
     expect(isUpdateAvailable('1.12.0', '')).toBe(false);
     expect(isUpdateAvailable('1.12.0', 'nightly')).toBe(false);
+  });
+});
+
+describe('★ 2026-10-12 shouldSkipUpdateCheck · 开发模式跳过启动强制更新', () => {
+  it('开发模式（未打包）默认跳过 → true（放行界面，不锁死）', () => {
+    expect(shouldSkipUpdateCheck({ isPackaged: false, forceCheck: false })).toBe(true);
+  });
+
+  it('开发模式 + 逃生舱 forceCheck → 不跳过（照常检查）', () => {
+    expect(shouldSkipUpdateCheck({ isPackaged: false, forceCheck: true })).toBe(false);
+  });
+
+  it('正式安装包（已打包）恒不跳过 → false（硬约束：已发布版本行为零变更）', () => {
+    expect(shouldSkipUpdateCheck({ isPackaged: true, forceCheck: false })).toBe(false);
+    expect(shouldSkipUpdateCheck({ isPackaged: true, forceCheck: true })).toBe(false);
+  });
+});
+
+describe('★ 2026-10-12 envForcesUpdateCheck · WINBOX_FORCE_UPDATE_CHECK 解析', () => {
+  it('真值（1/true/yes/on，大小写不敏感，含空格）→ true', () => {
+    expect(envForcesUpdateCheck({ [FORCE_UPDATE_CHECK_ENV]: '1' })).toBe(true);
+    expect(envForcesUpdateCheck({ [FORCE_UPDATE_CHECK_ENV]: 'true' })).toBe(true);
+    expect(envForcesUpdateCheck({ [FORCE_UPDATE_CHECK_ENV]: 'YES' })).toBe(true);
+    expect(envForcesUpdateCheck({ [FORCE_UPDATE_CHECK_ENV]: '  On  ' })).toBe(true);
+  });
+
+  it('缺失 / 空串 / 0 / false 等假值 → false', () => {
+    expect(envForcesUpdateCheck({})).toBe(false);
+    expect(envForcesUpdateCheck({ [FORCE_UPDATE_CHECK_ENV]: '' })).toBe(false);
+    expect(envForcesUpdateCheck({ [FORCE_UPDATE_CHECK_ENV]: '0' })).toBe(false);
+    expect(envForcesUpdateCheck({ [FORCE_UPDATE_CHECK_ENV]: 'false' })).toBe(false);
+    expect(envForcesUpdateCheck({ [FORCE_UPDATE_CHECK_ENV]: undefined })).toBe(false);
   });
 });
 
