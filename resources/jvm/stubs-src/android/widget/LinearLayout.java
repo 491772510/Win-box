@@ -26,19 +26,24 @@ public class LinearLayout extends ViewGroup {
     public float getWeightSum() { return 0f; }
     public void setDividerSoundsEnabled(boolean enabled) { }
 
-    /** LayoutParams stub：与 Android SDK 契约一致，含 weight/gravity 与布局尺寸常量。 */
-    public static class LayoutParams extends android.view.ViewGroup.LayoutParams {
+    /**
+     * LayoutParams stub：与 Android SDK 契约一致。
+     *
+     * ★★★ 父类必须是 **ViewGroup$MarginLayoutParams**（不是 ViewGroup$LayoutParams）★★★
+     * 真 Android 即如此。写错会让 `invokevirtual MarginLayoutParams.setMargins(...)`
+     * 在 -Xverify:none 下按错误 vtable 槽位派发 → JVM 硬崩，详见
+     * stubs-src/android/view/ViewGroup.java 里 LayoutParams 的注释。
+     */
+    public static class LayoutParams extends android.view.ViewGroup.MarginLayoutParams {
         public static final int WRAP_CONTENT = -2;
         public static final int MATCH_PARENT = -1;
         public float weight;
         public int gravity;
 
         public LayoutParams(int width, int height) { super(width, height); }
+        public LayoutParams(int width, int height, float weight) { super(width, height); this.weight = weight; }
         public LayoutParams(android.content.Context c, android.util.AttributeSet attrs) { super(c, attrs); }
         public LayoutParams(android.view.ViewGroup.LayoutParams p) { super(p); }
         public LayoutParams(android.view.ViewGroup.MarginLayoutParams p) { super(p); }
-        public void setMargins(int l, int t, int r, int b) { }
-        public int getMarginStart() { return 0; }
-        public int getMarginEnd() { return 0; }
     }
 }

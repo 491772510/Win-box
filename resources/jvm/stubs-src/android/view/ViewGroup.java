@@ -164,7 +164,54 @@ public class ViewGroup extends View implements ViewParent {
     }
 
     /**
-     * ★ 带边距的布局参数 —— 此前缺失，是本次 ClassNotFoundException 的直接原因。
+     * ★★★ 2026-10-12 必须在本类里**显式声明** LayoutParams（血的教训，别删）★★★
+     *
+     * 原因：View 里也有一个嵌套类 LayoutParams。若 ViewGroup 自己不声明，Java 的限定名
+     * 解析会把 `android.view.ViewGroup.LayoutParams`（哪怕是全限定名！）**静默解析成
+     * 从 View 继承来的 `android.view.View$LayoutParams`**。后果是整条继承线全塌：
+     *   - ViewGroup$MarginLayoutParams   extends View$LayoutParams   （应为 ViewGroup$LayoutParams）
+     *   - LinearLayout$LayoutParams      extends View$LayoutParams   （应为 MarginLayoutParams）
+     *   - WindowManager$LayoutParams     extends View$LayoutParams   （应为 ViewGroup$LayoutParams）
+     *   - ScrollView.addView(View,int,…) 签名变成 View$LayoutParams  （应为 ViewGroup$LayoutParams）
+     *
+     * 而 dex2jar 出来的蜘蛛字节码是按**真 Android** 签名编的，于是：
+     *   `invokevirtual android/view/ViewGroup$MarginLayoutParams.setMargins(IIII)V`
+     * 的接收者其实不是 MarginLayoutParams 子类。JVM 校验本该拦下（javac 会直接
+     * 「不兼容的类型」编译错误），但应用为了跑 dex2jar 产物强制 `-Xverify:none`
+     * （见 run-spider.sh 与 JarSpiderBridge）→ 未校验的虚调用按错误 vtable 槽位派发
+     * → **类型混淆 → EXCEPTION_ACCESS_VIOLATION，整个蜘蛛 JVM 硬崩**。
+     * 实证：wex 配置中心 `PanConfig.w` bci=86（配置项弹窗构建），崩溃日志
+     * `hs_err_pid42108.log`。修复前 javac 连 TestLp.java 都编不过。
+     *
+     * 继承 View.LayoutParams 是为了不丢 width/height/MATCH_PARENT/WRAP_CONTENT
+     * （它们在 View$LayoutParams 里），与真 Android 语义一致。
+     */
+    public static class LayoutParams extends View.LayoutParams {
+
+        public static final int FILL_PARENT = -1;
+        public static final int MATCH_PARENT = -1;
+        public static final int WRAP_CONTENT = -2;
+
+        public LayoutParams(int width, int height) {
+            super(width, height);
+        }
+
+        public LayoutParams(Context c, AttributeSet attrs) {
+            super(c, attrs);
+        }
+
+        public LayoutParams(LayoutParams source) {
+            super(source);
+        }
+
+        @Override
+        public String toString() {
+            return "LayoutParams{w=" + width + ", h=" + height + "}";
+        }
+    }
+
+    /**
+     * ★ 带边距的布局参数 —— 此前缺失，是某次 ClassNotFoundException 的直接原因。
      */
     public static class MarginLayoutParams extends LayoutParams {
 
