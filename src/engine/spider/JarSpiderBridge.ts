@@ -1105,7 +1105,11 @@ export class JarSpiderBridge {
       return;
     }
     // Baksmali 的子进程需要完整 classpath；不能把未展开的目录通配符传给它。
-    const d2jCp = this.dirJars(join(this.jvmDir, 'd2j')).map(p => resolve(p)).join(';');
+    // ★ 2026-10-12（macOS 合并 1.21.0 补偿）：d2jCp 是**真实 classpath** —— 它既进本进程 `-cp`，
+    //   又整串透传给 DexJarRepair（DexJarRepair.java:83 原样喂给 baksmali 的 `-cp`），
+    //   故必须用平台分隔符（darwin ':'）—— 上游 1.21.0 新写的这行硬编码 ';' 会让 macOS 上
+    //   整串被当作单个路径 → DEX 构造器修复必然失败（且 Windows 无感知）。
+    const d2jCp = this.cpJoin(this.dirJars(join(this.jvmDir, 'd2j')).map(p => resolve(p)));
     const java = resolve(this.javaExe());
     const work = `${part}.constructors.jar`;
     copyFileSync(part, work);
@@ -1113,7 +1117,7 @@ export class JarSpiderBridge {
       const output = await new Promise<string>((resolveOutput, reject) => {
         const child = spawn(java, [
           '-Xmx384m', '-XX:+UseSerialGC', '-XX:TieredStopAtLevel=1', '-Dfile.encoding=UTF-8',
-          '-cp', [resolve(bridgeJar), d2jCp].join(';'), 'com.winbox.nativebridge.DexJarRepair',
+          '-cp', this.cpJoin([resolve(bridgeJar), d2jCp]), 'com.winbox.nativebridge.DexJarRepair',
           resolve(rawJar), resolve(work), java, d2jCp,
         ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
         this.activeChildren.add(child);
