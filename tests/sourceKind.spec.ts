@@ -2,7 +2,7 @@
 // ★ 源形态归类：确保设置页「按形态显示字段」的判定稳定。
 // 这是 Task「整理 ext 配置界面」的回归护栏 —— 分类错了会把 ext 框藏起来或误留给 CMS 源。
 import { describe, it, expect } from 'vitest';
-import { sourceKindOf, sourceKindInfo, sourceKindLabel, extRelevant, isDoubanLikeSource, detailIsEmpty } from '../src/engine/config/sourceKind';
+import { sourceKindOf, sourceKindInfo, sourceKindLabel, extRelevant, isDoubanLikeSource, detailIsEmpty, configCenterHintOf } from '../src/engine/config/sourceKind';
 
 describe('sourceKindOf — type/api 归类', () => {
   it('type=0 → cms-xml，type=1 → cms-json（不走蜘蛛）', () => {
@@ -103,5 +103,43 @@ describe('isDoubanLikeSource / detailIsEmpty（无详情源判据）', () => {
     expect(detailIsEmpty({ episodes: {} })).toBe(true);
     expect(detailIsEmpty({ episodes: { q: [], y: [] } })).toBe(true);
     expect(detailIsEmpty({ episodes: { q: [{ url: 'u' }] } })).toBe(false);
+  });
+});
+
+// ★ 2026-10-12（用户报「配置中心里的内容点不进去、配置不了」）：
+//   加固壳源把配置项做成安卓原生对话框；桌面端弹不出来 → 靠详情正文里的「网页版配置中心」提示识别。
+//   这是点击分流的护栏：判错会把用户刚点进去的配置页弹去全源搜索（正是原 bug 的表现）。
+describe('configCenterHintOf（配置项识别）', () => {
+  it('★ wex 壳配置项实测原文 → 命中，并取出地址', () => {
+    // 反编译 PanConfig.F(id) 得到的固定文案（URL 由 U() 拼出）
+    const des = '如果弹窗没有显示，请打开网页版配置中心：http://192.168.31.222:19989/config';
+    const h = configCenterHintOf({ des });
+    expect(h).not.toBeNull();
+    expect(h!.url).toBe('http://192.168.31.222:19989/config');
+    expect(h!.text).toBe(des);
+  });
+
+  it('只有「配置中心」+「弹窗」而没有地址 → 仍命中断言（别的壳可能不给链接）', () => {
+    const h = configCenterHintOf({ des: '请前往【配置中心】设置；若弹窗未显示请稍后重试' });
+    expect(h).not.toBeNull();
+    expect(h!.url).toBe('');
+  });
+
+  it('普通影片简介（含 URL 但不提配置中心）→ 不命中', () => {
+    expect(configCenterHintOf({ des: '本片由 https://example.com 独家播出' })).toBeNull();
+    expect(configCenterHintOf({ des: '一个关于程序员的故事' })).toBeNull();
+    // 只提「配置中心」但没有地址也没有「弹窗」→ 宁窄勿宽，不判是
+    expect(configCenterHintOf({ des: '请到配置中心看看' })).toBeNull();
+  });
+
+  it('空 / 缺 des → null', () => {
+    expect(configCenterHintOf(null)).toBeNull();
+    expect(configCenterHintOf({})).toBeNull();
+    expect(configCenterHintOf({ des: '   ' })).toBeNull();
+  });
+
+  it('地址会被中文标点截断（不会把后续说明一并吃进 URL）', () => {
+    const h = configCenterHintOf({ des: '请打开网页版配置中心：http://127.0.0.1:9978/proxy/19970?do=pan&action=config。设置后刷新' });
+    expect(h!.url).toBe('http://127.0.0.1:9978/proxy/19970?do=pan&action=config');
   });
 });

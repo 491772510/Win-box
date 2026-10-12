@@ -18,6 +18,7 @@ import { fileLogger } from '../util/logger';
 import { parseSiteConfig, parseSiteConfigWithBase, looksLikeSubscribeJson, type ParseResult } from '../../engine/config/ApiConfigParser';
 import { parseMultiRepo, isFetchedRepoUrl, repoDisplayName, pickRepoLine, splitRepoLine, type MultiRepo } from '../../engine/config/multiRepo';
 import { SourceViewModel } from '../../engine/vod/SourceViewModel';
+import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import { parseToJsonArray, toLiveGroups } from '../../engine/live/TxtSubscribe';
 import { parseXmltv, buildEpgMap, pickCurrentNext, type ParsedXmltv } from '../../engine/live/epg';
 import { EpgStore } from '../live/EpgStore';
@@ -346,6 +347,19 @@ export class SpiderHost {
       logger: this.logger,
       jsLibDir: join(resourcesDir(), 'js-lib'),
       driveTokens: () => this.drives.list(),
+      /**
+       * ★ 2026-10-13：源侧（加固壳网页配置中心）「恢复配置后自动重启」的落地。
+       *   引擎层禁 import electron → 真正的重启动作由主进程入口注入到
+       *   {@link SpiderHost.onAppRestartRequest}（`app.relaunch()` + 走正常退出清理）。
+       *   未注入时只记日志（单测 / 无 GUI 环境），绝不抛错影响蜘蛛调用。
+       */
+      requestAppRestart: (reason: string) => {
+        if (!this.onAppRestartRequest) {
+          this.logger.w(`源侧请求重启应用，但宿主未接入重启能力（忽略）：${reason}`);
+          return;
+        }
+        this.onAppRestartRequest(reason);
+      },
     };
     // ★★ 2026-09-30（用户报「另一台设备用此本地包搜索时卡死」）：JS 蜘蛛改在 **worker 线程**里跑 ——
     //   实测根因：JS 源的同步 `req()` 由 spawnSync 实现，会把主进程冻住 0.4~1.5s/次，
@@ -498,6 +512,15 @@ export class SpiderHost {
   get host(): EngineHost {
     return this.engineHost;
   }
+
+  /**
+   * ★ 2026-10-13：源侧请求「重启应用」时由 SpiderHost 转交的回调。
+   *   由主进程入口（src/main/index.ts）注入 `app.relaunch()` 实现 ——
+   *   SpiderHost 本身不 import electron，保持可测试性。
+   *   触发源：加固壳（wex）网页配置中心「恢复配置后自动重启」
+   *   （`x0.e.v0()` → 桩 stderr 信令 → JarSpiderBridge → EngineHost.requestAppRestart）。
+   */
+  onAppRestartRequest?: (reason: string) => void;
 
   // ---------------------------- 用户配置管理（任务 B） ----------------------------
 
@@ -1617,6 +1640,37 @@ export class SpiderHost {
   }
   getSource(key: string): SourceBean | null {
     return this.sourceMap.get(key) ?? null;
+  }
+
+  /**
+   * ★ 2026-10-12（用户报「配置中心里的内容点不进去、配置不了」）：
+   * 解析该源「网页版配置中心」的候选地址（按可用性从高到低），交调用方逐个探活。
+   *
+   * 为什么需要它：加固壳（wex/玩偶系）的配置项在安卓上靠**原生 AlertDialog** 呈现，
+   * 桌面端没有视窗系统 → 对话框画不出来，唯一出路是蜘蛛自带的**网页版配置中心**。
+   * 但蜘蛛自报的地址（写在配置项备注 / 详情提示里，形如 `http://<lan-ip>:19989/config`）
+   * 在桌面端**端口是错的**（实测 19989 无人监听）。
+   *
+   * 真正可用的是应用自己的本地代理通道：`<LOCAL_PROXY_BASE>/proxy/<jvmPort>` 会把请求
+   * 转发进该源的蜘蛛 JVM，再由 JVM 内的宿主代理回答 `?do=pan&action=config`
+   * （与 /play 自解链走同一条路，见 LocalProxyServer.spiderJvmProxy）。
+   *
+   * jvmPort 由 JarSpiderBridge 在**首次调用该源时**登记（`call(tag)`）；
+   * 用户是在点开配置项时触发的，此时必然已登记。
+   */
+  configCenterCandidates(key: string): string[] {
+    const bean = this.getSource(key);
+    if (!bean) return [];
+    const out: string[] = [];
+    if (bean.type === 3) {
+      try {
+        const port = this.vm.proxyPortFor(bean);
+        if (port) out.push(`${LOCAL_PROXY_BASE}/proxy/${port}?do=pan&action=config`);
+      } catch {
+        /* 端口未登记（该源尚未被调用过）→ 交给调用方兜底 */
+      }
+    }
+    return out;
   }
 
   /** 应用退出时清理：终止所有 JVM 蜘蛛子进程，避免残留 */

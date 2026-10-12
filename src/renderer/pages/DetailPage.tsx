@@ -9,12 +9,13 @@ import { isDetailWindow } from '../lib/detailWin';
 import { uiMem, schedulePersist } from '../lib/uiMemory';
 import type { Episode, VodDetail } from '../../shared/types';
 import { playbackResultError } from '../../shared/playbackResult';
+import { GO_PROXY_LIMITATION_UI } from '../../shared/desktopLimits';
 import { useCovers } from '../lib/useCovers';
 import HeroBackdrop from '../components/HeroBackdrop';
 import { formatEpisodeLabel } from '../lib/epName';
 import { EP_PAGE_SIZE, epPageRanges, epPageSlice } from '../lib/epPager';
 import { makeStaleGuard } from '../lib/staleGuard';
-import { detailIsEmpty } from '../../engine/config/sourceKind';
+import { detailIsEmpty, configCenterHintOf } from '../../engine/config/sourceKind';
 import DriveBindModal from '../components/DriveBindModal';
 import { useTheme } from '../lib/theme';
 
@@ -247,8 +248,42 @@ export default function DetailPage({
   const directorText = (detail?.director || '').trim();
   const actorText = (detail?.actor || '').trim();
   const introText = (detail?.des || '').trim();
+  /**
+   * ★ 2026-10-12（用户报「配置中心里的内容点不进去、配置不了」）：
+   *   加固壳源（wex/玩偶系）的「配置中心」把每个配置项做成一个 `detailContent(id)` 分支，
+   *   点击后在安卓上弹**原生 AlertDialog** 让你开关 / 填 Cookie；桌面端没有视窗系统 → 弹不出来。
+   *   这类详情正文固定写着「如果弹窗没有显示，请打开网页版配置中心：<URL>」——
+   *   命中即说明**这是个配置项、不是片子**：不能按「无剧集」把它当豆瓣类源跳去全源搜索
+   *   （那正是用户看到的「点不进去」），而应给出「打开网页版配置中心」的出口。
+   */
+  const cfgHint = configCenterHintOf(detail);
+  /** ★ 2026-10-12：网页版配置中心的打开进度 / 失败原因（弹不出原生对话框时的唯一出路） */
+  const [cfgBusy, setCfgBusy] = useState(false);
+  const [cfgErr, setCfgErr] = useState('');
   /** 点击源提供的演员 → 对该关键词执行一次全源搜索。 */
   const goSearch = (kw: string): void => { void openSearchWindow(kw).catch((e) => setErr(String(e))); };
+
+  /**
+   * ★ 2026-10-12：打开该源的**网页版配置中心**（系统浏览器）。
+   *   主进程会用该源 JVM 的真实端口拼出可用地址（蜘蛛自报的地址端口在桌面端是错的），
+   *   并逐个探活后打开第一个能应答的；这里只管进度与失败上屏。
+   */
+  const openConfigCenter = (): void => {
+    const k = key || '';
+    if (!k) return;
+    setCfgBusy(true);
+    setCfgErr('');
+    // 用 Promise 包一层：主进程还没有该通道时（老版本进程 / 未重启）同步 TypeError 也能被 catch，
+    // 不至于把点击处理炸掉（渲染层是 HMR 热更的，主进程改动只有重启才生效）。
+    void Promise.resolve()
+      .then(() => client.vodConfigCenter(k, cfgHint?.url || ''))
+      .then(() => setCfgBusy(false))
+      .catch((e) => {
+        const msg = (e as Error)?.message || '';
+        setCfgErr(/is not a function|undefined/i.test(msg) ? '当前运行的进程还没有该功能，请重启应用后重试' : msg || '打开失败');
+        setCfgBusy(false);
+      });
+  };
 
   /**
    * ★ 2026-09-29（用户报「sun.json 有分类/封面，点进去无详情」- 通解）：
@@ -258,6 +293,9 @@ export default function DetailPage({
    */
   useEffect(() => {
     if (loading || !detail || autoAggRef.current) return;
+    // ★ 2026-10-12：配置项不是「无详情」—— 它是靠安卓原生对话框设置的东西，桌面端弹不出来。
+    //   按「无剧集」跳去全源搜索只会把用户弹走（表现为「点不进去」），这里必须放行。
+    if (configCenterHintOf(detail)) return;
     if (!detailIsEmpty(detail)) return;
     const kw = (detailName || detail.name || '').trim();
     if (!kw) return;
@@ -376,6 +414,22 @@ export default function DetailPage({
                   </button>
                 </div>
               </>
+            ) : cfgHint ? (
+              /* ★ 2026-10-12：配置项（加固壳源靠安卓原生对话框设置，桌面端弹不出来）→ 给网页版出口。
+                 不做全源搜索：那不是「无详情」，跳走只会让人觉得「点不进去」。 */
+              <div className="row" style={{ marginTop: 12, flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  这是一个「配置项」：它原本靠安卓原生弹窗设置，桌面端没有该弹窗 —— 请用网页版配置中心完成设置（设置后刷新本页即可）
+                </span>
+                <button className={`primary${nf ? ' nf-play-btn' : ''}`} disabled={cfgBusy} onClick={openConfigCenter}>
+                  {cfgBusy ? '正在打开…' : '打开网页版配置中心'}
+                </button>
+                {cfgErr && <span className="err" style={{ fontSize: 12, flexBasis: '100%' }}>{cfgErr}</span>}
+                {/* ★ 2026-10-13：这类源的配置项里有「Go 多线程服务」开关，桌面端跑不了
+                    （需要 Android 原生库 libwexproxy.so + root）。就地说明一句，
+                    免得用户在网页版里反复开关却始终没反应。文案见 shared/desktopLimits.ts。 */}
+                <span className="muted" style={{ fontSize: 12, flexBasis: '100%' }}>{GO_PROXY_LIMITATION_UI}</span>
+              </div>
             ) : (
               <div className="row" style={{ marginTop: 12, flexWrap: 'wrap', gap: 8 }}>
                 <span className="muted" style={{ fontSize: 12 }}>

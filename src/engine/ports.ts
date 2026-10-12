@@ -41,4 +41,15 @@ export interface EngineHost {
    * 纯内存、可缺省（未实现绑定的宿主不受影响）。
    */
   driveTokens?: () => Record<string, string>;
+  /**
+   * ★ 2026-10-13：**源侧请求重启应用**（加固壳网页配置中心恢复配置后自动重启）。
+   *
+   * 链路：wex 的 `x0.e.v0()` → `getLaunchIntentForPackage()` + `startActivity()` →
+   * 桩把带标记的 Intent 转成 stderr 信令（`[winbox] app-restart-request`）→
+   * 桥（JarSpiderBridge.noteBridgeLog）识别 → 调本回调 → 宿主做 Electron 重启。
+   *
+   * 引擎层禁 import electron → 由宿主（SpiderHost → 主进程入口）注入；
+   * 缺省不注入 = 只记日志（单测/无 GUI 环境）。
+   */
+  requestAppRestart?: (reason: string) => void;
 }

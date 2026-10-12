@@ -671,8 +671,23 @@ export default function ConfigPage() {
   }
 
   // ---- ★ 2026-09-29 设置备份（导出/导入；含渲染层 localStorage，观看历史在 tvboxUiMemory 里）----
-  const [bkMsg, setBkMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
+  const [bkMsg, setBkMsg] = useState<{ text: string; kind: 'ok' | 'err'; restart?: boolean } | null>(null);
   const [bkBusy, setBkBusy] = useState(false);
+  /**
+   * ★ 2026-10-13：还原成功后的「需重启应用」提示要**跨一次 reload** 存活。
+   *   还原流程末尾会 reload 渲染层刷新界面（组件 state 归零），所以用 sessionStorage 带一条标记：
+   *   reload 后读出来恢复提示 + 显示「立即重启」按钮。
+   *   此前只提示「部分设置需重启应用完全生效」却不提供任何重启入口 —— 用户看到的就是
+   *   「说重启却一直没重启」。
+   */
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem('winbox.restoreNeedRestart') === '1') {
+        sessionStorage.removeItem('winbox.restoreNeedRestart');
+        setBkMsg({ text: '已还原。部分设置需重启应用完全生效。', kind: 'ok', restart: true });
+      }
+    } catch { /* 存储不可用 → 只是少一次提示 */ }
+  }, []);
 
   function collectLocalStorage(): Record<string, string> {
     const out: Record<string, string> = {};
@@ -710,7 +725,9 @@ export default function ConfigPage() {
       try {
         for (const [k, v] of Object.entries(r.renderer || {})) localStorage.setItem(k, v);
       } catch { /* ignore */ }
-      setBkMsg({ text: '已还原，正在刷新界面…（部分设置需重启应用完全生效）', kind: 'ok' });
+      setBkMsg({ text: '已还原，正在刷新界面…', kind: 'ok' });
+      // ★ 2026-10-13：标记「需重启」，reload 后由挂载 effect 恢复提示并给出「立即重启」按钮
+      try { sessionStorage.setItem('winbox.restoreNeedRestart', '1'); } catch { /* ignore */ }
       window.setTimeout(() => window.location.reload(), 900);
     } catch (e) {
       setBkMsg({ text: (e as Error).message, kind: 'err' });
@@ -1881,6 +1898,15 @@ export default function ConfigPage() {
             <button disabled={bkBusy} onClick={() => void doBackupImport()}>导入设置备份</button>
             {bkMsg && (
               <span className={bkMsg.kind === 'err' ? 'err' : 'status'} style={{ margin: 0 }}>{bkMsg.text}</span>
+            )}
+            {bkMsg?.restart && (
+              <button
+                className="primary"
+                title="重启应用后所有还原的设置完全生效"
+                onClick={() => void client.appRestart('配置页：导入设置备份后重启')}
+              >
+                立即重启
+              </button>
             )}
           </div>
         </div>

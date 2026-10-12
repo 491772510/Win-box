@@ -64,7 +64,7 @@ export type AppPlatformName = 'darwin' | 'win32' | 'linux';
 declare global {
   interface Window {
     api: {
-      system: { ping: () => Promise<IpcResult<string>>; icon: () => Promise<IpcResult<string>>; setTheme: (t: string) => Promise<IpcResult<void>>; quit: () => Promise<IpcResult<void>>; dataDir: () => Promise<IpcResult<DataDirInfo>>; sessionId: () => Promise<IpcResult<string>>; platform: () => Promise<IpcResult<{ platform: AppPlatformName }>> };
+      system: { ping: () => Promise<IpcResult<string>>; icon: () => Promise<IpcResult<string>>; setTheme: (t: string) => Promise<IpcResult<void>>; quit: () => Promise<IpcResult<void>>; /** ★ 2026-10-13：重启应用 */ restart: (reason?: string) => Promise<IpcResult<void>>; dataDir: () => Promise<IpcResult<DataDirInfo>>; sessionId: () => Promise<IpcResult<string>>; platform: () => Promise<IpcResult<{ platform: AppPlatformName }>> };
       config: {
         import: (a: { url?: string; json?: string }) => Promise<IpcResult<ImportReturn>>;
         listSites: () => Promise<IpcResult<SourceBean[]>>;
@@ -121,6 +121,11 @@ declare global {
         /** ★ 2026-09-30（用户要求）：点播外部播放器（与磁力分开绑定）——探测本机播放器 / 用当前地址拉起 */
         detectPlayers: () => Promise<IpcResult<Array<{ id: string; name: string; path: string }>>>;
         openExternal: (a: { url: string; path?: string; seek?: number }) => Promise<IpcResult<{ ok: boolean; player?: string; error?: string }>>;
+        /**
+         * ★ 2026-10-12（用户报「配置中心里的内容点不进去、配置不了」）：
+         * 打开该源的「网页版配置中心」——加固壳源把配置项做成安卓原生对话框，桌面端弹不出来。
+         */
+        configCenter: (a: { key: string; url?: string }) => Promise<IpcResult<{ ok: boolean; url?: string; error?: string }>>;
       };
       live: {
         load: (index: number) => Promise<IpcResult<{ groups: LiveGroup[]; liveName: string }>>;
@@ -340,6 +345,8 @@ export const client = {
   winReportError: (message: string) => unwrap(window.api.win.reportError(message)),
   winOnNavigate: (cb: (route: string) => void) => window.api.win.onNavigate(cb),
   appQuit: () => unwrap(window.api.system.quit()),
+  /** ★ 2026-10-13：重启应用（app.relaunch + 正常退出清理）；「导入设置备份」还原后一键重启 */
+  appRestart: (reason?: string) => unwrap(window.api.system.restart(reason)),
   /** ★ 2026-09-30：本次主进程启动的会话标识（渲染层判定「新一次启动」→ 丢页面状态类记忆） */
   systemSessionId: () => unwrap(window.api.system.sessionId()),
   playerOpen: (init: unknown) => unwrap(window.api.player.open(init)),
@@ -446,6 +453,11 @@ export const client = {
   vodDetectPlayers: () => unwrap(window.api.vod.detectPlayers()),
   /** `seek`（秒）：显式绑定外部播放器时，从历史续播的位置（按播放器类型拼起播参数） */
   vodOpenExternal: (url: string, path?: string, seek?: number) => unwrap(window.api.vod.openExternal({ url, path, seek })),
+  /**
+   * ★ 2026-10-12：打开该源「网页版配置中心」（加固壳源的配置项在桌面端弹不出原生对话框）。
+   * `key` 必填（用于解析该源 JVM 的真实可用地址）；`url` 是蜘蛛自报地址，仅作兜底候选。
+   */
+  vodConfigCenter: (key: string, url?: string) => unwrap(window.api.vod.configCenter({ key, url })),
   /** ★ 2026-09-29 启动强制更新：检查 / 下载 / 拉起安装程序（进度走 onUpdateProgress） */
   updateCheck: () => unwrap(window.api.update.check()),
   updateDownload: () => unwrap(window.api.update.download()),

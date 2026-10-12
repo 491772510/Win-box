@@ -28,6 +28,7 @@ import { SpiderProcPool, poolEnabled, servePoolKey, WARM_METHOD, type PoolResult
 import { fixSelfSuperCallsInJarFile } from './classFix';
 import { hasNativeMethods } from './nativeClass';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
+import { GO_PROXY_LIMITATION_LOG, isGoProxySkipLine } from '../../shared/desktopLimits';
 import {
   archName,
   isMac,
@@ -411,6 +412,23 @@ export class JarSpiderBridge {
       this.bridgeNotesSeen.add(line);
       if (/失败|降级|不可用/.test(line)) this.host?.logger.w(`jar: ${line}`);
       else this.host?.logger.i(`jar: ${line}`);
+      // ★ 2026-10-13：原生桥那句「载荷库跳过」只有平台术语，用户看不出它就是在配置中心里
+      //   刚打开的「Go 多线程服务」——补一条结论性说明（文案见 shared/desktopLimits.ts，与界面共用）。
+      //   整行去重由上面的 bridgeNotesSeen 负责：同一条载荷只会提示一次。
+      if (isGoProxySkipLine(line)) this.host?.logger.w(GO_PROXY_LIMITATION_LOG);
+      // ★ 2026-10-13：源侧「重启应用」信令 → 交给宿主做真正的 Electron 重启。
+      //   加固壳（wex）恢复配置后会自己调 startActivity/getLaunchIntentForPackage/killProcess 三步；
+      //   桌面端没有 Activity 栈，这三步原先全是空转 → 网页写着「会自动重启」却一动不动。
+      //   现在桩把带标记的 Intent 转成这条 stderr 信令，这里接上宿主（SpiderHost → app.relaunch）。
+      //   放在上屏之后：即使宿主未注入回调，日志里也留有线索，不会静默。
+      if (line.startsWith(RESTART_SIGNAL_PREFIX)) {
+        this.host?.logger.w(`源侧请求重启应用（${line.slice(RESTART_SIGNAL_PREFIX.length).trim() || '未给原因'}）`);
+        try {
+          this.host?.requestAppRestart?.(line);
+        } catch (e) {
+          this.host?.logger.w(`重启应用失败：${(e as Error).message}`);
+        }
+      }
     }
   }
 
@@ -2734,6 +2752,14 @@ export function stripJvmNoise(stderr: string): string {
 }
 
 /**
+ * ★ 2026-10-13：源侧「重启应用」信令前缀 —— **必须与 Java 桩严格一致**，
+ * 见 `resources/jvm/stubs-src/android/content/Context.java` 的 `WINBOX_RESTART_MARK`
+ * 与 `android/content/pm/PackageManager.java` 的 `WINBOX_LAUNCH_ACTION`。
+ * 改这里就必须同步改那里（否则「恢复配置后自动重启」又会静默失效）。
+ */
+export const RESTART_SIGNAL_PREFIX = '[winbox] app-restart-request';
+
+/**
  * 抽取原生桥（ARM .so）在子进程里的说话行 —— 用于把「静默降级」可见化：
  * 桥的成败只打在子进程 stderr 上，而 stderr 平时只用于提取 SpiderLog 失败原因，
  * 于是「桥失败 → 按无原生桥降级」在界面与主日志里毫无线索（真机实测：只能靠手工探针才查出来）。
@@ -2762,6 +2788,10 @@ export function extractBridgeNotes(stderr: string): string[] {
     //   本函数，加白名单即全覆盖（noteBridgeLog 有整行去重，高频「请求处理失败」不会刷屏）。
     else if (t.startsWith('[host-proxy]')) out.push(t);
     else if (t.startsWith('[baidu-state]')) out.push(t);
+    // ★ 2026-10-13：桩发来的「源侧请求重启应用」信令（wex 恢复配置后自动重启）。
+    //   见 stubs-src/android/content/Context.startActivity + WINBOX_RESTART_MARK。
+    //   它同时是控制信令，noteBridgeLog 会据此触发真正的 Electron 重启。
+    else if (t.startsWith('[winbox]')) out.push(t);
   }
   return out;
 }

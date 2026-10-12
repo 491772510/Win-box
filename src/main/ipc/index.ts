@@ -1,8 +1,9 @@
 // src/main/ipc/index.ts — 注册所有 IPC handler
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { registerHandler } from '../util/ipcGuard';
 import { fileLogger } from '../util/logger';
+import { restartApp } from '../util/appRestart';
 import { SpiderHost } from '../spider/SpiderHost';
 import { resourcesDir, userDataDir, spiderCacheDir } from '../util/paths';
 import type { LocalPkgStore } from '../store/LocalPkgStore';
@@ -56,6 +57,26 @@ function winOf(e: IpcMainInvokeEvent): BrowserWindow | null {
   return BrowserWindow.fromWebContents(e.sender);
 }
 
+/**
+ * ★ 2026-10-12：本机地址探活（打开网页版配置中心前先确认哪个候选真的能应答）。
+ *
+ * 只用于 127.0.0.1 / 局域网地址，**一律直连**（Node 的 fetch 默认不读 HTTP_PROXY 环境变量，
+ * 正是我们要的语义）；跟随重定向（蜘蛛自报地址常是 302 → 本地代理）。
+ * 超时压得很短：探活失败要尽快落到下一个候选，别让用户干等。
+ */
+async function probeLocalHttp(url: string, timeoutMs = 2500): Promise<boolean> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { method: 'GET', redirect: 'follow', signal: ac.signal });
+    return r.status >= 200 && r.status < 400;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** ★ 本次主进程启动的会话标识（模块求值 = 应用启动一次；重启必变） */
 const SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -105,6 +126,14 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
   // 退出整个应用（免责声明「拒绝」等场景）
   registerHandler(IPC.APP_QUIT, () => {
     app.quit();
+    return { ok: true };
+  }, log);
+  /**
+   * ★ 2026-10-13：重启应用（渲染层一键重启；配置页「导入设置备份」还原后提供）。
+   *   与源侧自动重启共用 main/util/appRestart.ts 的唯一实现（app.relaunch + 正常退出清理）。
+   */
+  registerHandler(IPC.APP_RESTART, (_e: any, a: { reason?: string } | undefined) => {
+    restartApp(a?.reason || '用户请求');
     return { ok: true };
   }, log);
   // 亮/深色模式：同步到原生主题（影响 Mica 背景与窗口底色），并更新当前窗口背景色
@@ -638,6 +667,34 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
     const started = launchPlayer(p.path, u, seekArgs(p.id, seek));
     log.i(`vod: 外部播放器接力「${p.name}」${seek > 0 ? `（起播 ${seek}s）` : ''}→ ${u.slice(0, 120)}`);
     return started ? { ok: true, player: p.name } : { ok: false, error: `无法启动「${p.name}」` };
+  }, log);
+
+  /**
+   * ★ 2026-10-12（用户报「配置中心里的内容点不进去、配置不了」）：
+   * 在系统浏览器里打开该源的**网页版配置中心**。
+   *
+   * 背景：加固壳源把配置项做成安卓原生 AlertDialog（桌面端画不出来），蜘蛛自己提供了
+   * 网页版配置中心兜底。但它在提示里自报的地址端口不对（实测 19989 无人监听），
+   * 真正可用的是本地代理通道 `/proxy/<jvmPort>?do=pan&action=config`（见
+   * SpiderHost.configCenterCandidates）。这里逐个探活，开第一个真正能应答的；
+   * 自报地址作为兜底候选（别的壳可能正好是通的）。
+   */
+  registerHandler(IPC.VOD_CONFIG_CENTER, async (_e: any, a: { key?: string; url?: string } | string) => {
+    const arg = typeof a === 'string' ? { key: a, url: '' } : (a || { key: '', url: '' });
+    const key = String(arg.key || '');
+    const cands = key ? host.configCenterCandidates(key) : [];
+    const given = String(arg.url || '').trim();
+    if (given) cands.push(given);
+    if (!cands.length) return { ok: false, error: '该源尚未加载过，请先打开一次它的首页再试' };
+    for (const u of cands) {
+      if (await probeLocalHttp(u)) {
+        log.i(`vod: 打开网页版配置中心 → ${u}`);
+        void shell.openExternal(u);
+        return { ok: true, url: u };
+      }
+    }
+    log.w(`vod: 网页版配置中心不可达（${key}）：${cands.join(' / ')}`);
+    return { ok: false, error: `网页版配置中心不可达（已试 ${cands.length} 个地址）` };
   }, log);
 
   // ★ 2026-09-29 WebDAV 存储（只读）：服务器管理 + 目录浏览；取流走 `/play?dav=<id>`（中继注入 Authorization）

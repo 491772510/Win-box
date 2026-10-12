@@ -134,3 +134,39 @@ export function detailIsEmpty(d: { episodes?: Record<string, unknown[]> } | null
   if (!d || !d.episodes) return true;
   return !Object.values(d.episodes).some((list) => Array.isArray(list) && list.length > 0);
 }
+
+// ---- ★ 2026-10-12（用户报「配置中心点不进去、配置不了」）----
+
+/** 详情简介里识别出的「网页版配置中心」提示 */
+export interface ConfigCenterHint {
+  /** 提示原文（详情页直接展示） */
+  text: string;
+  /** 提示里带的地址（可能为空 —— 有的壳只说「请打开网页版配置中心」不给链接） */
+  url: string;
+}
+
+/**
+ * 「这个详情其实是个**配置项**，不是片子」的判据。
+ *
+ * 背景（wex/玩偶等加固壳的「配置中心」源）：蜘蛛把每个配置项做成一个 `detailContent(id)` 分支，
+ * 点击后由**安卓原生 UI**（`AlertDialog` + `LinearLayout` + `EditText`）画出开关 / Cookie 输入框，
+ * 经 `Handler(Looper.getMainLooper()).post()` 投到安卓主线程显示；返回的详情只用来提示
+ * 「设置成功后刷新配置中心」。
+ *
+ * 桌面端没有 Activity / 视窗系统 ⇒ 对话框永远画不出来。蜘蛛作者对此早有预案，所以详情正文
+ * 固定写成「如果弹窗没有显示，请打开网页版配置中心：<URL>」——**这句提示本身就是
+ * 「本项目需要去网页版配置」的信号**。
+ *
+ * 调用方据此应：① 不做「无剧集 → 自动全源搜索」的跳转（否则用户刚点进去就被弹走，
+ * 表现为「点不进去」）；② 把提示与地址渲染成可见可点的出口。
+ *
+ * 判据刻意收窄（宁窄勿宽）：必须出现「配置中心」，且同时带 http(s) 地址或「弹窗」字样——
+ * 普通影片简介里出现 URL 很常见，不能仅凭 URL 判定。
+ */
+export function configCenterHintOf(d: { des?: string } | null | undefined): ConfigCenterHint | null {
+  const text = String(d?.des ?? '').trim();
+  if (!text || !/配置中心/.test(text)) return null;
+  const url = (text.match(/https?:\/\/[^\s，。；、"'）)】]+/) || [''])[0];
+  if (!url && !/弹窗/.test(text)) return null;
+  return { text, url };
+}

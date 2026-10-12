@@ -27,6 +27,7 @@ import { IPC } from '../shared/ipc-channels';
 import { localImportsDir, userDataDir } from './util/paths';
 import { safeStorageDriveCodec } from './util/driveCodec';
 import { installApplicationMenu } from './menu';
+import { restartApp } from './util/appRestart';
 import {
   exeName,
   isMac,
@@ -43,6 +44,17 @@ declare const __dirname: string;
 
 let mainWindow: BrowserWindow | null = null;
 const host = new SpiderHost();
+/**
+ * ★ 2026-10-13：**源侧请求重启应用**的落地（加固壳网页配置中心「恢复配置后自动重启」）。
+ *
+ * 链路：wex `x0.e.v0()` → 桩 `stubs-src/android/content/Context.startActivity` 打
+ * stderr 信令 `[winbox] app-restart-request` → `JarSpiderBridge.noteBridgeLog` 识别 →
+ * `EngineHost.requestAppRestart` → 这里 → `restartApp()`（app.relaunch + 走正常退出清理）。
+ *
+ * 为什么在此注入而不是让 SpiderHost 直接用 electron：`src/main/spider/SpiderHost.ts`
+ * 与 `src/engine/**` 都不 import electron（保可测试性 / 引擎可脱离 Electron 运行）。
+ */
+host.onAppRestartRequest = (reason: string) => restartApp(reason);
 /**
  * ★ 2026-09-29：磁力（BT）引擎（用户选定方案 B）—— aria2c sidecar + 本机中继 `/bt` + 外部播放器接力。
  * 懒启动（首次磁力播放才拉起 aria2c），退出时 dispose（另有 `--stop-with-process` 兜底防孤儿）。

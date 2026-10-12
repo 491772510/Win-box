@@ -11,7 +11,7 @@ const invoke = <T>(channel: string, ...args: unknown[]): Promise<IpcResult<T>> =
   ipcRenderer.invoke(channel, ...args);
 
 const api = {
-  system: { ping: () => invoke<string>(IPC.SYSTEM_PING), icon: () => invoke<string>(IPC.APP_ICON), setTheme: (t: string) => invoke<void>(IPC.THEME_SET, t), quit: () => invoke<void>(IPC.APP_QUIT), dataDir: () => invoke(IPC.SYSTEM_DATA_DIR), sessionId: () => invoke<string>(IPC.SYSTEM_SESSION_ID), /** ★ 2026-10-12：归一化平台名（渲染层平台感知的唯一入口；见 renderer/lib/platform.ts） */ platform: () => invoke<{ platform: PlatformName }>(IPC.WB_APP_PLATFORM) },
+  system: { ping: () => invoke<string>(IPC.SYSTEM_PING), icon: () => invoke<string>(IPC.APP_ICON), setTheme: (t: string) => invoke<void>(IPC.THEME_SET, t), quit: () => invoke<void>(IPC.APP_QUIT), /** ★ 2026-10-13：重启应用（app.relaunch + 正常退出清理）；配置页还原备份后一键重启 */ restart: (reason?: string) => invoke<void>(IPC.APP_RESTART, { reason }), dataDir: () => invoke(IPC.SYSTEM_DATA_DIR), sessionId: () => invoke<string>(IPC.SYSTEM_SESSION_ID), /** ★ 2026-10-12：归一化平台名（渲染层平台感知的唯一入口；见 renderer/lib/platform.ts） */ platform: () => invoke<{ platform: PlatformName }>(IPC.WB_APP_PLATFORM) },
   config: {
     import: (args: { url?: string; json?: string }) => invoke(IPC.CONFIG_IMPORT, args),
     listSites: () => invoke(IPC.CONFIG_LIST_SITES),
@@ -112,6 +112,12 @@ const api = {
     // ★ 2026-09-30（用户要求）：`seek`（秒）—— 从历史续播时按播放器类型拼起播参数
     openExternal: (a: { url: string; path?: string; seek?: number }) =>
       invoke<{ ok: boolean; player?: string; error?: string }>(IPC.VOD_OPEN_EXTERNAL, a),
+    /**
+     * ★ 2026-10-12：打开该源的「网页版配置中心」（加固壳源的配置项在桌面端弹不出原生对话框）。
+     *   `key` 用于解析该源 JVM 的真实可用地址；`url` 是蜘蛛自报地址（兜底候选）。
+     */
+    configCenter: (a: { key: string; url?: string }) =>
+      invoke<{ ok: boolean; url?: string; error?: string }>(IPC.VOD_CONFIG_CENTER, a),
   },
   live: {
     load: (index: number) => invoke(IPC.LIVE_LOAD, index),

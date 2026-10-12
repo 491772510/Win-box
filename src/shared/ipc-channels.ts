@@ -4,6 +4,17 @@ export const IPC = {
   SYSTEM_PING: 'system:ping',
   APP_ICON: 'app:icon',
   APP_QUIT: 'app:quit',
+  /**
+   * ★ 2026-10-13：**重启应用**（渲染层主动请求）。
+   *
+   * 背景：应用自己的「导入设置备份」还原后提示「部分设置需重启应用完全生效」，
+   * 但此前只 reload 渲染层、不重启进程 —— 用户看到的就是「说重启却一直没重启」。
+   * 现提供一键重启（`app.relaunch()` + 走正常退出清理）。
+   *
+   * 与源侧自动重启同一条实现（`main/util/appRestart.ts`）：加固壳（wex）网页配置中心
+   * 「恢复配置后自动重启」经 stderr 信令 → EngineHost.requestAppRestart 也走它。
+   */
+  APP_RESTART: 'app:restart',
   THEME_SET: 'theme:set',
   /**
    * ★ 2026-09-30（用户要求）：数据目录信息（安装目录/data；含老用户迁移结果/回退原因）。
@@ -201,6 +212,12 @@ export const IPC = {
    *  点播外部播放器（探测 / 用当前播放地址拉起）—— 绑定值 `vodExternalPlayer` 与磁力分开 */
   VOD_DETECT_PLAYERS: 'vod:detectPlayers',
   VOD_OPEN_EXTERNAL: 'vod:openExternal',
+  /**
+   * ★ 2026-10-12：打开该源的「网页版配置中心」（加固壳源把配置项做成安卓原生对话框，
+   *   桌面端弹不出来 → 改走蜘蛛自带的网页版；见 sourceKind.configCenterHintOf）。
+   *   入参 `{ key, url? }`：key 用于解析该源 JVM 的真实可用地址；url 为蜘蛛自报地址（兜底）。
+   */
+  VOD_CONFIG_CENTER: 'vod:configCenter',
   // ★ 2026-09-29 启动强制更新：查 GitHub 最新 Release / 代理加速下载 Setup / 拉起安装程序
   UPDATE_CHECK: 'update:check',
   UPDATE_DOWNLOAD: 'update:download',
