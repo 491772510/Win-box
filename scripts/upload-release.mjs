@@ -30,9 +30,19 @@ const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const tag = `release${pkg.version}`;
 const repo = 'yagami-hue/Win-box';
 const output = resolve(root, pkg.build.directories.output);
+// electron-builder normalizes numeric version components when it creates the
+// artifact name (for example, package version 1.21.01 becomes 1.21.1).
+const artifactVersions = [...new Set([
+  pkg.version,
+  String(pkg.version).split('.').map(part => /^\d+$/.test(part) ? String(Number(part)) : part).join('.'),
+])];
+const installerNames = new Set(artifactVersions.flatMap(version => [
+  `Win-Box Setup ${version}.exe`,
+  `Win-Box ${version}.exe`,
+]));
 const assets = readdirSync(output, { withFileTypes: true })
   .filter(e => e.isFile() && e.name.toLowerCase().endsWith('.exe') &&
-    (e.name === `Win-Box Setup ${pkg.version}.exe` || e.name === `Win-Box ${pkg.version}.exe`))
+    installerNames.has(e.name))
   .map(e => join(output, e.name));
 if (!assets.length) {
   console.error(`No installers for ${pkg.version} found in ${output}`);
