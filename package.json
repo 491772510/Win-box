@@ -65,6 +65,7 @@
       "package.json",
       "!resources/.tmp/**",
       "!resources/jvm/stubs-src/**",
+      "!resources/jvm/stubs/*.bak*",
       "!resources/jvm/tools/**",
       "!resources/jvm/libs/jython-standalone-2.7.3.jar",
       "!resources/**/hs_err_pid*.log",
