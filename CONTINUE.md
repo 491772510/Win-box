@@ -6,14 +6,15 @@
 - 8 个真实订阅中 7 个可导入（潇洒本地 CBC 解封装已补齐）；肥猫原始响应第 124 行缺少 `ext` 的开引号。小虎斑目标源仍返回空蜘蛛，小米 Wogg 已通过初始化/搜索/详情，壹影视暂无数据；不能宣称全部源稳定。
 - 嗷呜 AppV7Fz 三次全新隔离目录冷启动：两次首页/搜索/详情成功，第三次动态原生库装载后在 240 秒窗口内未结束；Luck 三次通过，不能据此消除嗷呜冷启动问题。
 - FishGuard 的非阻塞 TCP/socket/epoll 网络就绪及 pvideo 本地代理完整传输仍未验收；当前 unidbg `TcpSocket` 仍是阻塞式 Java Socket，不能仅清除 `SOCK_NONBLOCK` 冒充完成。已有真实 m3u8/FFmpeg 短时播放样本不代表全部网络能力完成。
-- 当前改动已提交到本地 `main`（包含版本 `1.21.01`）；重新提交时需推送到配置的 GitHub `origin/main`。继续工作时必须保留这些既有改动。
+- 当前版本源码已同步到 GitHub `origin/main`（发布流程修复提交 `816c2d3`）；GitHub Release `release1.21.01` 已公开发布。继续工作时必须保留这些既有改动。
 
 ## 已完成验证
 
 - 真实 UC：当前 Cookie 认证成功；分享 `b37622addbf04` 递归发现 32 个文件，精确选中 `QYN-S01TBB-E24.4K(1).mkv`；合并下载接口刷新 Cookie 后 Range 返回 HTTP 206、`video/x-matroska`。独立 MPV 解码约 4 秒成功（仅空输出探针）；随后开发态应用 `player.open → IPC → SpiderHost.play → 本地中继 → HTML5` 真实解码 1920×1080、56 帧，音频计数 54560 bytes，时间推进到 2.15 秒。
 - 百度应用窗口真实起播：1920×800、56 帧、音频 56862 bytes；夸克用当前真实搜索/详情两集完成首次/下一集/上一集，均为 1920×1080、56~57 帧，音频计数大于 0。旧夸克第二样本 fid 已不在分享列表，失败记录保留，不盲选替代文件。
 - 本轮夸克转存清理已确认 pending=0；修正明确“文件已经删除”（HTTP 400/code 23004）的幂等响应，其它认证/权限/限流错误仍保留重试。清理只使用本隔离 profile 的既有待删 fid。
-- 最终源码/JAR 重建后的 UC 应用窗口复测再次通过：1920×1080、53 帧、音频 50960 bytes、时间 2.03 秒（`.tmp/current-drive-ui-uc-final.log`）。资产 SHA/版本/清理计数记录在 `.tmp/current-final-manifest.json`；版本已更新为 1.21.01，未生成安装包。
+- 最终源码/JAR 重建后的 UC 应用窗口复测再次通过：1920×1080、53 帧、音频 50960 bytes、时间 2.03 秒（`.tmp/current-drive-ui-uc-final.log`）。资产 SHA/版本/清理计数记录在 `.tmp/current-final-manifest.json`；版本已更新为 1.21.01，正式安装包已生成。
+- GitHub Release `release1.21.01` 已公开发布，仅包含 `Win-Box.Setup.1.21.1.exe`；本地与 GitHub 附件 SHA-256 均为 `c488ca24cbb5d34b55b6977fd829d4dfa223808f38f9a8938f40e7edf08c8102`，大小为 221,783,305 bytes。
 - 8 个真实订阅导入源数：嗷呜 76、潇洒 106、摸鱼儿 97、饭太硬 48、wex 99、小虎斑 67、小米 43；肥猫因源响应实际语法错误未导入。日志：`.tmp/current-source-audit/*.log`。
 - 源级 home/search/detail：摸鱼儿 Wogg/Luck、嗷呜 Wogg/Wobg、wex 花卷/玩偶、饭太硬玩偶/热播、潇洒热播影视/一起影视、小米 Wogg 均有真实结果；小虎斑目标源返回空蜘蛛、小米壹影视暂无数据。已修正探针 search 返回数组和 home.sortClasses 的字段计数。
 - 重点测试：27 passed（历史记录）。
