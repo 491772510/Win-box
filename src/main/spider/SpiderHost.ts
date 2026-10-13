@@ -2087,6 +2087,24 @@ export class SpiderHost {
   }
 
   /**
+   * ★ 2026-10-13：源侧（加固壳网页配置中心）恢复配置、请求「重启应用」时调用 ——
+   *   让全部蜘蛛**重新初始化**，等效于重启，但不退出进程。
+   *
+   * 动作与 `resetSpidersAfterDriveChange()` 相同（清引擎实例缓存 + 丢弃常驻 JVM），
+   * 只是触发点不同：那边是网盘凭据文件，这边是源自己要求重启。
+   *
+   * ★★ **绝不能改用 `dispose()`** ★★
+   * `dispose()` 是给「应用退出」用的：它会 `clearInterval(this.poolReclaimTimer)`，
+   * 而该定时器**只在构造时创建一次、不会重建** —— 用一次就再没有空闲回收，
+   * 之后每次软重启都会累积常驻 JVM 进程。它还 `releaseJailDrive()` 卸掉沙箱盘，
+   * 这里也不需要（沙箱目录仍在使用，下次调用会自动 ensure）。
+   */
+  resetSpidersForConfigReload(): void {
+    this.vm.spiderFactory.clear();
+    this.bridge.resetPool();
+  }
+
+  /**
    * ★ 2026-09-28：`play` 外层只做**诊断埋点**（阶段/耗时/结果/原因），解析逻辑原样在 `playInner`。
    *
    * 为什么：用户报「部分源正常但资源落不了盘/放不出来，成功率约 50%」——只有把每次播放的

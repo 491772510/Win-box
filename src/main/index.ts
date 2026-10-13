@@ -27,7 +27,7 @@ import { IPC } from '../shared/ipc-channels';
 import { localImportsDir, userDataDir } from './util/paths';
 import { safeStorageDriveCodec } from './util/driveCodec';
 import { installApplicationMenu } from './menu';
-import { restartApp } from './util/appRestart';
+import { restartApp, setSoftRestartHandler, shouldDeferQuitCleanup } from './util/appRestart';
 import {
   exeName,
   isMac,
@@ -55,6 +55,49 @@ const host = new SpiderHost();
  * 与 `src/engine/**` 都不 import electron（保可测试性 / 引擎可脱离 Electron 运行）。
  */
 host.onAppRestartRequest = (reason: string) => restartApp(reason);
+/**
+ * ★ 2026-10-13：开发模式「软重启」落地（原因见 `util/appRestart.ts` 头注释）。
+ *
+ * 三步：
+ * <ol>
+ *   <li>关掉主窗口以外的窗口（网页版配置中心 / 播放器窗 / 详情子窗 …）。主窗口**保留** ——
+ *       全关会触发 `window-all-closed` → 非 darwin 直接 `app.quit()`，那就变回进程重启了。</li>
+ *   <li>`host.resetSpidersForConfigReload()` 丢弃全部常驻 JVM + 清引擎实例缓存。
+ *       源侧（wex 等）刚恢复的配置写在沙箱文件里，下一次调用会重新拉起 JVM 并重读 ——
+ *       这正是「重启」要达到的效果。**不能用 `dispose()`**：那是给退出用的，会清掉
+ *       只创建一次的池回收定时器（详见 `SpiderHost.resetSpidersForConfigReload` 注释）。</li>
+ *   <li>重载界面：渲染层重新初始化并重新拉取源列表 / 首页。</li>
+ * </ol>
+ */
+setSoftRestartHandler(() => {
+  let mainAlive = false;
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isDestroyed()) continue;
+    if (w === mainWindow) {
+      mainAlive = true;
+      continue;
+    }
+    try {
+      w.close();
+    } catch {
+      /* 关不掉也无所谓，reload 后它们本来就该重建 */
+    }
+  }
+  try {
+    host.resetSpidersForConfigReload();
+  } catch (e) {
+    fileLogger.w(`软重启：重置蜘蛛失败：${(e as Error).message}`);
+  }
+  if (mainAlive && mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.webContents.reload();
+    } catch (e) {
+      fileLogger.w(`软重启：重载界面失败：${(e as Error).message}`);
+    }
+  } else {
+    createWindow();
+  }
+});
 /**
  * ★ 2026-09-29：磁力（BT）引擎（用户选定方案 B）—— aria2c sidecar + 本机中继 `/bt` + 外部播放器接力。
  * 懒启动（首次磁力播放才拉起 aria2c），退出时 dispose（另有 `--stop-with-process` 兜底防孤儿）。
@@ -392,12 +435,23 @@ app.on('will-quit', (event) => {
   // 删除机会，避免窗口关闭后马上退出导致“播完即删”只写入队列却未发出请求。
   if (!quitCleanupStarted) {
     quitCleanupStarted = true;
-    event.preventDefault();
-    void Promise.race([
-      host.quarkDeletePending(),
-      new Promise<void>((resolve) => setTimeout(resolve, 8_000)),
-    ]).finally(() => app.quit());
-    return;
+    // ★ 2026-10-13：**重启场景绝不能在这里异步挂起**。
+    //   `app.relaunch()` 会立刻 spawn 一个 `--type=relauncher` 子进程，它必须等本进程
+    //   **真正退出**才会拉起新实例；一旦在 will-quit 里 preventDefault 挂住，退出流程
+    //   走不完 → 旧进程不退、relauncher 死等 → 用户看到「窗口关了，应用再也不起来」。
+    //   （真机取证与完整论证见 `util/appRestart.ts` 的 shouldDeferQuitCleanup 注释）
+    if (shouldDeferQuitCleanup()) {
+      event.preventDefault();
+      void Promise.race([
+        host.quarkDeletePending(),
+        new Promise<void>((resolve) => setTimeout(resolve, 8_000)),
+      ]).finally(() => app.quit());
+      return;
+    }
+    fileLogger.w(
+      '重启退出：跳过异步清理等待，改为立即同步清理' +
+        '（否则 relauncher 永远等不到本进程退出，新实例就起不来）',
+    );
   }
   try {
     // ★ 退出前再尝试一次夸克落盘文件清理（失败会持久化到下次启动重试）
