@@ -91,7 +91,7 @@ export class UpdateService {
     //   逃生舱：WINBOX_FORCE_UPDATE_CHECK=1 时开发模式也照常检查（便于验证更新流程）。
     //   红线：正式安装包（app.isPackaged === true）行为**零变更**。
     if (shouldSkipUpdateCheck({ isPackaged: app.isPackaged, forceCheck: envForcesUpdateCheck(process.env) })) {
-      this.log.i('更新检查：开发模式（未打包）跳过强制更新检查（如需测试更新流程，请设 WINBOX_FORCE_UPDATE_CHECK=1）');
+      this.log.i('更新检查：开发模式（未打包）跳过更新检查（如需测试更新流程，请设 WINBOX_FORCE_UPDATE_CHECK=1）');
       return base;
     }
 
