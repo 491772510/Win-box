@@ -133,10 +133,64 @@ function writeMarker(target: string, from: string): void {
 }
 
 /**
+ * ★ 2026-10-13 真机数据丢失事故：**迁移标记存在，不代表旧目录是残留**。
+ *
+ * 迁移完成后，只要用户再跑一次**旧版本 / 开发版**（本仓库 dev 模式固定用
+ * `app.getPath('userData')` = `%APPDATA%\win-box`，见 `planDataDir` 的 `activate=false`），
+ * 旧目录就会被**重新创建**并写入**更新的**用户数据 —— 源配置、档案、wex 沙箱 cookie 全在里面。
+ *
+ * 此时若仍按「清理残留」无条件 `rmSync`，等于把用户刚刚通过 WebDAV 恢复的配置
+ * **永久删除（`rmSync` 不进回收站）**。事故现场：dev 版数据目录在官方安装版启动 20 秒后
+ * 被整目录抹掉，用户观感是「重启后配置都没了」。
+ *
+ * 判据：比对旧目录里关键用户数据与迁移标记的修改时间。
+ * 数据比标记新 → 判定「在用数据」，**一个字节都不删**，只上报交由用户处置。
+ */
+const LIVE_USER_DATA_RELS = ['user-config.json', 'winbox-cache/spider/sandbox/shared_prefs'];
+
+/**
+ * 取路径的「最新修改时间」；目录则递归下探取其子项的最大值。
+ *
+ * ★ 为什么不能只看目录自身 mtime：目录 mtime 只在**增删条目**时更新，
+ *   **改写已有文件内容不会更新它**。wex 沙箱 `shared_prefs` 正是「几个固定文件被反复改写」，
+ *   只看目录 mtime 会把「刚恢复的 cookie」误判成残留。
+ */
+function latestMtimeMs(p: string, depth = 3): number | null {
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(p);
+  } catch {
+    return null;
+  }
+  if (!st.isDirectory() || depth <= 0) return st.mtimeMs;
+  let max = st.mtimeMs;
+  try {
+    for (const name of readdirSync(p)) {
+      const ms = latestMtimeMs(join(p, name), depth - 1);
+      if (ms !== null && ms > max) max = ms;
+    }
+  } catch {
+    /* 读不到子项就用目录自身 mtime，不因此失败 */
+  }
+  return max;
+}
+
+/** 旧目录里是否存在比迁移标记**更新**的用户数据（存在 → 绝不能当残留清理）。 */
+export function legacyHasLiveUserData(legacy: string, marker: string): boolean {
+  const markerMs = latestMtimeMs(marker);
+  for (const rel of LIVE_USER_DATA_RELS) {
+    const ms = latestMtimeMs(join(legacy, ...rel.split('/')));
+    if (ms === null) continue;
+    if (markerMs === null || ms > markerMs) return true;
+  }
+  return false;
+}
+
+/**
  * 把旧数据目录迁移到目标目录；返回迁移结果（绝不抛异常）。
  * 语义：
  *  - 旧目录不存在 → no-legacy（全新安装）；
- *  - 已有迁移标记 → already（只清理旧目录残留）；
+ *  - 已有迁移标记 → already（只清理旧目录残留；★ 若旧目录里有比标记更新的在用数据 → **保留不删**）；
  *  - 同盘且目标不存在 → renameSync 整目录移动（moved，秒级）；
  *  - 其余 → 递归复制（跳过纯缓存；同尺寸文件视为已复制 → 可断点续传），成功后写标记并删除旧目录；
  *  - 任一文件复制失败 → failed（**不写标记、不删旧目录**，下次启动重试）。
@@ -154,6 +208,13 @@ export function migrateLegacy(legacy: string, target: string): MigrateOutcome {
   if (existsSync(markerPath(target))) {
     out.status = 'already';
     if (existsSync(legacy)) {
+      // ★ 2026-10-13：先判断旧目录是「残留」还是「在用数据」，后者绝不删（理由见 legacyHasLiveUserData）
+      if (legacyHasLiveUserData(legacy, markerPath(target))) {
+        out.error =
+          `旧目录里有比迁移标记更新的用户数据，可能是旧版本/开发版留下的在用配置，` +
+          `已原样保留未清理：${legacy}（本进程使用的是 ${target}）`;
+        return out;
+      }
       const c = tryRemove(legacy);
       out.cleanedLegacy = c.ok;
       if (!c.ok) out.error = `旧目录残留清理未完成（${c.error}）`;

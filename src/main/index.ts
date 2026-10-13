@@ -255,6 +255,11 @@ app.whenReady().then(async () => {
     } else {
       fileLogger.i(`数据目录: ${dataDirReport.target}（模式 ${dataDirReport.mode}；${migDesc}）`);
     }
+    // ★ 2026-10-13：旧目录若被判定为「在用数据」而未清理，必须单独告警 ——
+    //   混在 info 那行里极易被略过，用户会误以为「配置丢了」（事故当天的实际观感）。
+    if (m && !m.cleanedLegacy && m.error) {
+      fileLogger.w(`数据目录注意：${m.error}`);
+    }
   } catch {
     /* ignore */
   }

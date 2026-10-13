@@ -2,11 +2,12 @@
 // ★ 2026-09-30：数据目录迁移（安装目录/data）单测 —— planDataDir / ensureWritableDir /
 //   shouldSkipRel / migrateLegacy（moved / copied 跳过缓存 / 断点续传 / 失败保留旧目录 / 已有标记只清残留）。
 import { describe, it, expect, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ensureWritableDir,
+  legacyHasLiveUserData,
   markerPath,
   migrateLegacy,
   planDataDir,
@@ -226,6 +227,58 @@ describe('dataDir — migrateLegacy（迁移主流程）', () => {
     expect(out.cleanedLegacy).toBe(true);
     expect(existsSync(legacy)).toBe(false);
     expect(existsSync(join(target, 'user-config.json'))).toBe(false); // 不再二次复制
+  });
+
+  it('★ 已有迁移标记、但旧目录里有更新的用户配置：保留不删（2026-10-13 事故）', () => {
+    const base = tmpDir();
+    const legacy = join(base, 'legacy');
+    const target = join(base, 'install', 'data');
+    mkdirSync(legacy, { recursive: true });
+    mkdirSync(target, { recursive: true });
+    writeFileSync(markerPath(target), '{"migratedFrom":"x"}');
+    // 模拟「迁移早已完成，之后旧版本/dev 版又往旧目录写了新数据」
+    const marker = markerPath(target);
+    writeFileSync(join(legacy, 'user-config.json'), 'newer');
+    const newer = new Date(statSync(marker).mtimeMs + 5_000);
+    utimesSync(join(legacy, 'user-config.json'), newer, newer);
+    expect(legacyHasLiveUserData(legacy, marker)).toBe(true);
+    const out = migrateLegacy(legacy, target);
+    expect(out.status).toBe('already');
+    expect(out.cleanedLegacy).toBe(false);
+    expect(existsSync(join(legacy, 'user-config.json'))).toBe(true); // 一个字节都没删
+    expect(String(out.error)).toContain('已原样保留未清理');
+  });
+
+  it('★ 旧目录只有 wex 沙箱配置比标记新：同样保留（cookie 也是要用数据）', () => {
+    const base = tmpDir();
+    const legacy = join(base, 'legacy');
+    const target = join(base, 'install', 'data');
+    mkdirSync(join(legacy, 'winbox-cache/spider/sandbox/shared_prefs'), { recursive: true });
+    mkdirSync(target, { recursive: true });
+    writeFileSync(markerPath(target), '{"migratedFrom":"x"}');
+    const marker = markerPath(target);
+    const cookie = join(legacy, 'winbox-cache/spider/sandbox/shared_prefs', 'NewWexFnw_preferences.xml');
+    writeFileSync(cookie, '<map/>');
+    const newer = new Date(statSync(marker).mtimeMs + 5_000);
+    utimesSync(cookie, newer, newer);
+    const out = migrateLegacy(legacy, target);
+    expect(out.status).toBe('already');
+    expect(out.cleanedLegacy).toBe(false);
+    expect(existsSync(cookie)).toBe(true);
+  });
+
+  it('★ 旧目录数据不比标记新（真·残留）：维持原语义清理', () => {
+    const base = tmpDir();
+    const legacy = join(base, 'legacy');
+    const target = join(base, 'install', 'data');
+    mkdirSync(legacy, { recursive: true });
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(legacy, 'user-config.json'), 'stale');
+    writeFileSync(markerPath(target), '{"migratedFrom":"x"}'); // 标记后写 → 不比标记新
+    const out = migrateLegacy(legacy, target);
+    expect(out.status).toBe('already');
+    expect(out.cleanedLegacy).toBe(true);
+    expect(existsSync(legacy)).toBe(false);
   });
 
   it('相同路径：直接 no-legacy（不发生任何动作）', () => {
