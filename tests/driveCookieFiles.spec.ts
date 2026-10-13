@@ -2,7 +2,7 @@
 // 关键契约：落点 <tmp>/tvbox-ext/TVBox/<盘>.txt（= 外部存储桩/TVBox），内容 {"cookie":"..."}；
 // 缺失/为空时 jar 的 filterCloudDiskLinks 会把对应网盘链接降级丢弃 → 详情播放列表为空。
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -20,6 +20,11 @@ import {
   writeWexCookieFile,
   removeWexCookieFile,
   syncWexCookieFiles,
+  WEX_PREF_KEYS,
+  WEX_HOST_PREFS_FILE,
+  wexHostPrefsPath,
+  syncWexHostPrefs,
+  removeWexHostPref,
 } from '../src/main/spider/driveCookieFiles';
 
 let root = '';
@@ -140,5 +145,89 @@ describe('driveCookieFiles — wex 系（玩偶/花卷/木偶）cookie 文件同
     removeWexCookieFile('quark', sandbox);
     expect(existsSync(wexCookiePath('quark', sandbox))).toBe(false);
     removeWexCookieFile('quark', sandbox); // 再删不抛（force）
+  });
+});
+
+// ★ 2026-10-13：AiWex 系（新光影 / AiPan1Me / 玩偶 / 木偶 / AiNewWoNiu4K …）
+//   这版壳**不读** `files/TV/.quarkcookie`（全库 grep `quarkcookie` 零命中），
+//   它读的是 SharedPreferences `NewWexFnw_preferences` 里的 `Wex_*_cookie`。
+//   用户侧症状：明明绑过夸克，源却报「还没有配置夸克 Cookie」。
+describe('driveCookieFiles — AiWex 系 SharedPreferences 默认值同步（2026-10-13）', () => {
+  const CK = '__pus=a859a0db7e4db42+9/792f0ea27c350cd6AAQXs+TbjYfy1bwajUwawR; __uid=AAQzt2PXGWDJGkk/g/4pC0iS; __puus=831fa3b6==';
+
+  it('落点：<沙箱>/shared_prefs/winbox-host-prefs.properties（桩侧按同名常量读）', () => {
+    const sandbox = spiderSandboxDir(root);
+    expect(wexHostPrefsPath(sandbox)).toBe(join(root, 'sandbox', 'shared_prefs', WEX_HOST_PREFS_FILE));
+    // 键名是壳里反编译出来的常量，改了这族源就全认不到
+    expect(WEX_PREF_KEYS).toEqual({
+      quark: 'Wex_quark_cookie',
+      uc: 'Wex_ucpan_cookie',
+      baidu: 'Wex_baidu_cookie',
+    });
+  });
+
+  it('按 `key=value` 逐行写；cookie 里的 = ; + / 原样保留（桩侧只按第一个 = 切一刀）', () => {
+    const sandbox = spiderSandboxDir(root);
+    const keys = syncWexHostPrefs({ quark: CK, uc: 'U1', baidu: 'B1' }, sandbox);
+    expect(keys.sort()).toEqual(['Wex_baidu_cookie', 'Wex_quark_cookie', 'Wex_ucpan_cookie']);
+    const text = readFileSync(wexHostPrefsPath(sandbox), 'utf-8');
+    const line = text.split('\n').find((l) => l.startsWith('Wex_quark_cookie='))!;
+    expect(line).toBe(`Wex_quark_cookie=${CK}`);
+  });
+
+  it('空值/无映射 provider 跳过；大小写不敏感', () => {
+    const sandbox = spiderSandboxDir(root);
+    expect(syncWexHostPrefs({ quark: '  ', alipan: 'A1', UC: 'U2' }, sandbox)).toEqual(['Wex_ucpan_cookie']);
+    expect(existsSync(wexCookiePath('quark', sandbox))).toBe(false); // 不该顺手写 wex 旧通道
+  });
+
+  it('值里的换行必须压平 —— 否则 properties 行解析会把一行拆成两行', () => {
+    const sandbox = spiderSandboxDir(root);
+    syncWexHostPrefs({ quark: 'A\r\nB' }, sandbox);
+    const text = readFileSync(wexHostPrefsPath(sandbox), 'utf-8');
+    expect(text.trim().split('\n')).toHaveLength(1);
+    expect(text.trim()).toBe('Wex_quark_cookie=A B');
+  });
+
+  it('解绑只摘掉那一个键，其它绑定不受影响', () => {
+    const sandbox = spiderSandboxDir(root);
+    syncWexHostPrefs({ quark: 'Q1', uc: 'U1', baidu: 'B1' }, sandbox);
+    removeWexHostPref('quark', sandbox);
+    const text = readFileSync(wexHostPrefsPath(sandbox), 'utf-8');
+    expect(text).not.toContain('Wex_quark_cookie');
+    expect(text).toContain('Wex_ucpan_cookie=U1');
+    expect(text).toContain('Wex_baidu_cookie=B1');
+    removeWexHostPref('quark', sandbox); // 幂等
+  });
+
+  it('★ 全部解绑后文件写成空 —— 否则桩侧继续兜底，解绑不生效', () => {
+    const sandbox = spiderSandboxDir(root);
+    syncWexHostPrefs({ quark: 'Q1', uc: 'U1' }, sandbox);
+    removeWexHostPref('quark', sandbox);
+    removeWexHostPref('uc', sandbox);
+    expect(readFileSync(wexHostPrefsPath(sandbox), 'utf-8')).toBe('');
+    // 再同步一次（tokens 为空）也必须留空文件，而不是留着旧内容
+    expect(syncWexHostPrefs({}, sandbox)).toEqual([]);
+    expect(readFileSync(wexHostPrefsPath(sandbox), 'utf-8')).toBe('');
+  });
+
+  it('★ 内容没变就不重写 —— 桩侧按 mtime 裁定谁更新，每次启动都刷 mtime 会让宿主恒赢', () => {
+    const sandbox = spiderSandboxDir(root);
+    const path = wexHostPrefsPath(sandbox);
+    const old = new Date('2020-01-01');
+    syncWexHostPrefs({ quark: 'Q1' }, sandbox);
+    utimesSync(path, old, old);
+    syncWexHostPrefs({ quark: 'Q1' }, sandbox); // 同内容 → 不动文件
+    expect(statSync(path).mtimeMs).toBe(old.getTime());
+    syncWexHostPrefs({ quark: 'Q2' }, sandbox); // 内容变了 → 才刷新 mtime
+    expect(statSync(path).mtimeMs).toBeGreaterThan(old.getTime());
+    expect(readFileSync(path, 'utf-8')).toBe('Wex_quark_cookie=Q2\n');
+  });
+
+  it('解绑未绑定的 provider / 文件不存在：不抛也不创建', () => {
+    const sandbox = spiderSandboxDir(root);
+    expect(() => removeWexHostPref('quark', sandbox)).not.toThrow();
+    expect(() => removeWexHostPref('alipan', sandbox)).not.toThrow();
+    expect(existsSync(wexHostPrefsPath(sandbox))).toBe(false);
   });
 });

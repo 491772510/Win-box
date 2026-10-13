@@ -161,6 +161,111 @@ export function removeWexCookieFile(provider: string, sandboxDir: string): void 
   rmSync(path, { force: true });
 }
 
+// ---------------------------------------------------------------------------
+// ★ 2026-10-13 AiWex 系（新光影 AiNewGuanYing / AiPan1Me / 玩偶 / 木偶 / AiNewWoNiu4K …）
+//   ——**这一版壳真正的凭据通道**
+//
+// 反编译实证（本会话取证，jar = converted/runtime-dex/*.r2.jar）：
+//   · 这版壳**根本不读** `files/TV/.quarkcookie`（那是旧版家族的通道，
+//     全库 grep `quarkcookie` 零命中）——继续只写那份文件等于白写。
+//   · 它把全部账号/网盘凭据放在 Android SharedPreferences：
+//       Context.getSharedPreferences("NewWexFnw_preferences", 0)   ← 见 merge/x0/e.H()
+//     键名：`Wex_quark_cookie` / `Wex_ucpan_cookie` / `Wex_baidu_cookie` /
+//           `Wex_pan115_cookie` / `Wex_bili_cookie` / `Wex_guanying_cookie` /
+//           `Wex_pan1me_cookie` / `Wex_WoNiu4K_Cookie` / `Wex_guangya_zhenying_cookie` …
+//   · 用户看到的「还没有配置夸克 Cookie」出自读 `Wex_quark_cookie` 的类（merge/d0/i、merge/h0/k）。
+//
+// 根因有两层，缺一不可：
+//   ① 桩 `android.content.SharedPreferences$Mem` 此前是**纯内存** → 宿主每次回收/重启
+//      蜘蛛 JVM，`Wex_*` 全空，网页配置中心登录一次也留不住。已改为真持久化
+//      （`<沙箱>/shared_prefs/<name>.xml`，与壳自己的备份同路径同格式）。
+//   ② 用户在 Win-box「网盘」页扫码绑定的 cookie 只进 DriveStore，壳那条路永远不会被写。
+//      → 落成下面这份「宿主默认值」文件，由桩在**载入时**兜底并入。
+//
+// ⚠ 语义是「缺省」而非「覆盖」：壳会自己刷新 cookie（auth/pc/flush 回写 Wex_quark_cookie）。
+//   若宿主值恒优先，壳刷新完又被旧值盖回 → 反而把有效凭据改坏。
+//   桩的实现保证：宿主默认值只读兜底、**绝不落盘** → 用户在 Win-box 解绑即失效。
+// ---------------------------------------------------------------------------
+
+/** DriveStore provider（小写）→ AiWex 系 SharedPreferences 键名 */
+export const WEX_PREF_KEYS: Record<string, string> = {
+  quark: 'Wex_quark_cookie',
+  uc: 'Wex_ucpan_cookie',
+  baidu: 'Wex_baidu_cookie',
+};
+
+/** 宿主默认值文件名（桩侧常量 HOST_PREFS_FILE 必须与此一致） */
+export const WEX_HOST_PREFS_FILE = 'winbox-host-prefs.properties';
+
+/** 宿主默认值文件：`<沙箱>/shared_prefs/winbox-host-prefs.properties` */
+export function wexHostPrefsPath(sandboxDir: string): string {
+  return join(sandboxDir, 'shared_prefs', WEX_HOST_PREFS_FILE);
+}
+
+/**
+ * 把 DriveStore 凭据写成「宿主默认值」文件（本文件由宿主独占 → 全量重写）。
+ *
+ * 格式：每行 `key=value`，UTF-8，**不做任何转义**（桩侧按第一个 `=` 切一刀）。
+ * cookie 里含 `=` / `;` / `+` / `/` 都没问题；但绝不能含换行，故先压平。
+ *
+ * ★★ **内容没变就不要重写这个文件**（哪怕只是启动时的例行同步）★★
+ * 桩侧按 mtime 裁定「宿主值和壳的 XML 值谁更新」——
+ * 若每次启动都把它刷新成「现在」，宿主就恒赢，壳自己刷新的 cookie 反而永远被盖掉。
+ *
+ * @returns 写入的 SharedPreferences 键名列表（无映射/空值跳过；全部解绑时为空数组）
+ */
+export function syncWexHostPrefs(tokens: Record<string, string>, sandboxDir: string): string[] {
+  const dir = join(sandboxDir, 'shared_prefs');
+  const lines: string[] = [];
+  for (const [p, v] of Object.entries(tokens || {})) {
+    const key = WEX_PREF_KEYS[String(p || '').trim().toLowerCase()];
+    if (!key || typeof v !== 'string') continue;
+    const value = v.trim();
+    if (!value) continue;
+    lines.push(`${key}=${value.replace(/[\r\n]+/g, ' ')}`);
+  }
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, WEX_HOST_PREFS_FILE);
+  // ★ 没有任何绑定时也要写（空文件）：否则解绑最后一个后，旧文件仍在 → 解绑不生效
+  const next = lines.length ? `${lines.join('\n')}\n` : '';
+  let prev: string | null = null;
+  try {
+    prev = existsSync(path) ? readFileSync(path, 'utf-8') : null;
+  } catch {
+    prev = null;
+  }
+  if (prev !== next) writeFileSync(path, next, 'utf-8');
+  return lines.map((l) => l.slice(0, l.indexOf('=')));
+}
+
+/**
+ * 解绑：从宿主默认值文件里摘掉该 provider 的键。
+ * 桩侧不再兜底 → 该源回到「未配置」状态（除非用户另外在网页配置中心登录过）。
+ */
+export function removeWexHostPref(provider: string, sandboxDir: string): void {
+  const key = WEX_PREF_KEYS[String(provider || '').trim().toLowerCase()];
+  const path = wexHostPrefsPath(sandboxDir);
+  if (!key || !existsSync(path)) return;
+  try {
+    const kept = readFileSync(path, 'utf-8')
+      .split('\n')
+      .filter((l) => {
+        const t = l.trim();
+        if (!t) return false;
+        const eq = t.indexOf('=');
+        return eq > 0 && t.slice(0, eq).trim() !== key;
+      });
+    writeFileSync(path, kept.length ? `${kept.join('\n')}\n` : '', 'utf-8');
+  } catch {
+    // 读不了就整份重写为空：解绑语义下宁可全清，也不能留下已解绑的凭据
+    try {
+      writeFileSync(path, '', 'utf-8');
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 /**
  * 全量同步：把 tokens 里所有有映射的 provider 落盘（wex 系）。
  * 返回实际写入的文件绝对路径列表（无变化/无映射的跳过）。

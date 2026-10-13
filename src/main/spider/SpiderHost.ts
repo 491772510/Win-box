@@ -63,8 +63,10 @@ import { JarSpiderBridge, normalizeJarUrl } from '../../engine/spider/JarSpiderB
 import {
   removePizazzCookieFile,
   removeWexCookieFile,
+  removeWexHostPref,
   syncPizazzCookieFiles,
   syncWexCookieFiles,
+  syncWexHostPrefs,
   spiderSandboxDir,
 } from './driveCookieFiles';
 import { sourceTimeoutMs } from '../../engine/spider/SpiderFactory';
@@ -695,7 +697,10 @@ export class SpiderHost {
     this.drives.remove(provider);
     // ★ 解绑 → 清掉各系 cookie 文件（jar 侧「文件存在且非空」即视为已配置，必须一并清）
     removePizazzCookieFile(provider);
-    removeWexCookieFile(provider, spiderSandboxDir(spiderCacheDir()));
+    const sandbox = spiderSandboxDir(spiderCacheDir());
+    removeWexCookieFile(provider, sandbox);
+    // ★ 2026-10-13：AiWex 系走 SharedPreferences，解绑同样要撤掉宿主兜底值
+    removeWexHostPref(provider, sandbox);
     this.resetSpidersAfterDriveChange();
   }
 
@@ -1299,16 +1304,24 @@ export class SpiderHost {
    *     详情组装播放列表前会按链接域名逐个检查这些文件，缺失即把该网盘链接降级丢弃
    *     （用户侧现象：源能进能搜、详情里却没有可播资源）。
    *   · ★ 2026-10-09 wex 系（玩偶/花卷/木偶等壳通解家族）：`<spider 沙箱>/files/TV/.quarkcookie`
-   *     （UC = `.ucpancookie`），内容为**裸 cookie 串**——Quark/Ucpan 的 checkXXXcookie 直接读它，
-   *     缺失即报「还没有配置夸克 Cookie」（反编译实证见 driveCookieFiles.ts 头注释）。
+   *     （UC = `.ucpancookie`），内容为**裸 cookie 串**——旧版家族的 checkXXXcookie 直接读它。
+   *   · ★★ 2026-10-13 AiWex 系（新光影 / AiPan1Me / 玩偶 / 木偶 / AiNewWoNiu4K …）：
+   *     **这版壳不读 .quarkcookie，它读 SharedPreferences 里的 `Wex_*_cookie`**
+   *     （`<沙箱>/shared_prefs/winbox-host-prefs.properties` 由宿主写入、桩在载入时兜底并入）。
+   *     缺失即报「还没有配置夸克 Cookie」（反编译实证见 driveCookieFiles.ts）。
    *   调用点：绑定（driveSet / 网页登录）、解绑（删文件）、还原设置、启动（%TEMP%/沙箱可能被系统清理）。 */
   syncDriveFiles(): void {
     const tokens = this.drives.list();
     for (const [p, v] of Object.entries(tokens)) this.syncCloudDriveConfig(p, v);
     const written = syncPizazzCookieFiles(tokens);
     if (written.length) this.logger.i(`已同步 Pizazz 系网盘 cookie 文件：${written.join(', ')}`);
-    const wexWritten = syncWexCookieFiles(tokens, spiderSandboxDir(spiderCacheDir()));
+    const sandbox = spiderSandboxDir(spiderCacheDir());
+    const wexWritten = syncWexCookieFiles(tokens, sandbox);
     if (wexWritten.length) this.logger.i(`已同步 wex 系网盘 cookie 文件：${wexWritten.join(', ')}`);
+    // ★ 2026-10-13：AiWex 系（新光影 / AiPan1Me / 玩偶 / 木偶 …）读的是 SharedPreferences
+    //   `Wex_*_cookie`，只有这里同步了，扫码绑定的夸克/UC/百度才会被那一族源认账。
+    const prefKeys = syncWexHostPrefs(tokens, sandbox);
+    if (prefKeys.length) this.logger.i(`已同步 AiWex 系网盘凭据（SharedPreferences 默认值）：${prefKeys.join(', ')}`);
   }
 
   // fty 系网盘 jar 从 Cloud-drive 配置文件读的键名（Cloud_quark→quarkCookie / Cloud_uc→ucCookie）
