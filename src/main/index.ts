@@ -152,6 +152,17 @@ torrent.onSpeed = pushSpeed;
 // ★ 2026-09-26：壳/蜘蛛的宿主代理（`/proxy/<jvmPort>?do=proxy&key=…`）被访问 → 钉住那个 JVM
 proxy.onSpiderProxy = (port) => host.pinSpiderProxy(port);
 proxy.onPythonProxy = (key, params) => host.pythonProxy(key, params);
+/**
+ * ★ 2026-10-13：**源侧恢复配置后重启的宿主侧兜底**。
+ *
+ * 源侧（`stubs` → stderr 信令）那条路已打通，但**不可靠**：承载配置中心的 JVM 常常在
+ * 还原完成后立刻死掉，wex 自己排的 3 秒 `Handler.post` 来不及发出（真机三次还原只成功一次）。
+ * 本地代理是这条链路的必经之处 —— 它在**拿到还原应答的那一刻**就观测到了，
+ * 不依赖任何 JVM 之后是否存活，于是重启从「看运气」变成确定行为。
+ *
+ * 两条路先到者生效，另一路被 `restartApp` 的 20s 抑制窗挡掉，不会重复重启。
+ */
+proxy.onSpiderConfigRestored = (hint) => restartApp(`源侧恢复配置（${hint}）`);
 // ★ 2026-09-29：`/bt/<hash>/<idx>` 取流口（Range + piece 门控 + 本地读盘）
 proxy.bt = torrent;
 

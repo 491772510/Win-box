@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto';
 import { decodeUrlSafe } from '../../engine/util/base64';
 import type { Logger } from '../../shared/types';
 import { LOCAL_PROXY_BASE, LOCAL_PROXY_PORT } from '../../shared/constants';
+import { isSpiderRestoreResponse, RESTORE_RESTART_DELAY_MS, spiderRestoreActionOf } from '../../shared/spiderRestore';
 import { userDataDir, cacheDir } from '../util/paths';
 import { logPlayDiag, redactUrl } from '../util/playDiag';
 import { createDohAgent } from '../net/DnsResolver';
@@ -80,6 +81,16 @@ export class LocalProxyServer {
    *   key 只有那个 JVM 能解，所以这里要做一次本机转发；转发的同时通知池别回收它，否则播放中段断流。
    */
   onSpiderProxy?: (port: number) => void;
+  /**
+   * ★ 2026-10-13：观测到「源侧刚恢复完配置」的回调（主进程注入 → 触发重启）。
+   *
+   * 为什么需要它：wex 自己排的那个「3 秒后重启」经常来不及发 —— 承载配置中心的 JVM
+   * 在还原完成后就死了（真机三次还原只有一次收到信令，另两次直接 19970 ECONNREFUSED）。
+   * 本地代理是这条链路的必经之处，宿主观测到的时刻不依赖任何 JVM 存活。
+   * 判据见 `shared/spiderRestore.ts`；源侧信令那条路保持不动，先到者生效（另一侧被
+   * `restartApp` 的抑制窗挡掉）。
+   */
+  onSpiderConfigRestored?: (hint: string) => void;
   onPythonProxy?: (key: string, params: Record<string, string>) => Promise<unknown[]>;
   /** ★ 2026-09-29：BT 取流口（磁力 B；main/index.ts 注入 TorrentPlay；未注入 = /bt 一律 404） */
   bt?: BtStreamAccess;
@@ -199,6 +210,9 @@ export class LocalProxyServer {
         bodyTimeout: 0, // 媒体流可能很长：不做 body 超时
         headers: fwdHeaders,
       });
+      // ★ 2026-10-13：源侧「恢复完配置」的宿主侧观测点。
+      //   放在拿到应答的第一时间 —— 这一刻不依赖 JVM 之后是否还活着（详见 shared/spiderRestore.ts）。
+      this.noteSpiderRestoreIfAny(u.search, up.statusCode);
       const outHeaders: Record<string, string> = {};
       for (const k of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
         const v = up.headers[k];
@@ -250,6 +264,34 @@ export class LocalProxyServer {
       res.writeHead(502, { 'Content-Type': 'text/plain' });
       res.end('spider jvm proxy unreachable');
     }
+  }
+
+  /**
+   * ★ 2026-10-13：若本次自解链应答代表「源侧刚恢复完配置」，排一次延迟重启通知。
+   *
+   * 放在**拿到应答的那一刻**（而不是等转发完成）：承载配置中心的 JVM 常常在还原之后
+   * 立刻死掉（真机三次还原两次直接 19970 ECONNREFUSED），晚了就观测不到。
+   *
+   * 延迟 `RESTORE_RESTART_DELAY_MS` 再通知，是为了让这份「恢复成功」的应答体完整送回
+   * 浏览器 —— 否则用户看到的是「还原失败」，而配置其实已经写进沙箱了。
+   * 重复触发交给 `restartApp` 的抑制窗兜住（源侧 stderr 信令先到则本路被挡）。
+   */
+  private noteSpiderRestoreIfAny(search: string, status: number): void {
+    const action = spiderRestoreActionOf(search);
+    if (!action) return;
+    if (!isSpiderRestoreResponse(search, status)) {
+      this.logger.w(`proxy: 源侧还原动作 ${action} 未成功（status=${status}），不触发重启`);
+      return;
+    }
+    const hint = `${action}（宿主侧观测）`;
+    this.logger.w(`proxy: 观测到源侧还原成功（${hint}）→ 将在 ${RESTORE_RESTART_DELAY_MS}ms 后重启以加载新配置`);
+    setTimeout(() => {
+      try {
+        this.onSpiderConfigRestored?.(hint);
+      } catch (e) {
+        this.logger.w(`proxy: 还原后重启回调失败：${(e as Error).message}`);
+      }
+    }, RESTORE_RESTART_DELAY_MS);
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {

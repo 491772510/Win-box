@@ -34,16 +34,23 @@ const m = vi.hoisted(() => ({
 vi.mock('electron', () => ({ app: m.app }));
 vi.mock('../src/main/util/logger', () => ({ fileLogger: m.logger }));
 
-import { restartApp, setSoftRestartHandler, shouldDeferQuitCleanup } from '../src/main/util/appRestart';
+import {
+  resetRestartSuppression,
+  restartApp,
+  setSoftRestartHandler,
+  shouldDeferQuitCleanup,
+} from '../src/main/util/appRestart';
 
 const logged = (): string => m.logger.w.mock.calls.map((c) => String(c[0])).join('\n');
 
 // ⚠️ 用例顺序有意义：`restartRequested` 是模块级单例，一旦置位不会回退。
 //    凡是不希望它置位的用例（软重启 / 默认值）必须排在进程级重启用例之前。
+//    （20s 抑制窗由 beforeEach 里的 resetRestartSuppression 复位，不受此约束。）
 describe('restartApp', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     m.app.isPackaged = false;
+    resetRestartSuppression();
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -70,6 +77,20 @@ describe('restartApp', () => {
     expect(shouldDeferQuitCleanup()).toBe(true);
     // 日志要把「为什么不真重启」说清楚，避免下一次又被当成 bug
     expect(logged()).toContain('重启引擎');
+  });
+
+  it('20s 抑制窗：两条触发路径（源侧信令 + 宿主观测）同时打进来也只重启一次', () => {
+    const soft = vi.fn();
+    setSoftRestartHandler(soft);
+
+    restartApp('测试：源侧 stderr 信令');
+    restartApp('测试：宿主侧本地代理观测');
+    restartApp('测试：又一次观测');
+
+    expect(soft, '两次触发必须合并成一次重启').toHaveBeenCalledTimes(1);
+    expect(logged()).toContain('被抑制');
+    // 抑制的是「重复触发」，不能顺带把「重启过」这个事实也抹掉
+    expect(shouldDeferQuitCleanup(), 'dev 软重启本就不置位').toBe(true);
   });
 
   // ---- 以下用例会置位 restartRequested，必须排在最后 ----

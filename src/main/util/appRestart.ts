@@ -80,8 +80,31 @@ export function shouldDeferQuitCleanup(): boolean {
   return !restartRequested;
 }
 
+/**
+ * ★ 2026-10-13：重启抑制窗（毫秒）。
+ *
+ * 「源侧恢复配置」现在有**两条**触发路径：
+ *   ① 加固壳自己的 `Handler.post(3s)` → stderr 信令 → `SpiderHost.onAppRestartRequest`
+ *   ② 宿主从本地代理观测到还原应答 → `LocalProxyServer.onSpiderConfigRestored`
+ * 两条都能触发时不仅会重复重启，还会出现「第二条在重启中途又打进来」的乱序。
+ * 取 20s：覆盖 wex 的 3s post + 宿主的 3.5s 延迟，且远小于一次重启的耗时。
+ */
+const RESTART_SUPPRESS_MS = 20_000;
+let lastRestartAt = 0;
+
+/** 仅供测试：把抑制窗状态复位 */
+export function resetRestartSuppression(): void {
+  lastRestartAt = 0;
+}
+
 export function restartApp(reason: string): void {
   try {
+    const since = Date.now() - lastRestartAt;
+    if (lastRestartAt > 0 && since >= 0 && since < RESTART_SUPPRESS_MS) {
+      fileLogger.w(`重启请求被抑制（${RESTART_SUPPRESS_MS / 1000}s 内已触发过，本次来源：${reason}）`);
+      return;
+    }
+    lastRestartAt = Date.now();
     fileLogger.w(`应用即将重启（${reason}）`);
     if (!app.isPackaged && softRestartHandler) {
       fileLogger.w(
