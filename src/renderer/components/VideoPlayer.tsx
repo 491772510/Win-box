@@ -7,7 +7,7 @@ import { useHoverDelay } from '../lib/useHoverDelay';
 import { usePlayerPanelPosition } from '../lib/usePlayerPanelPosition';
 import Hls from 'hls.js';
 import mpegts from 'mpegts.js';
-import { uiMem, setPlayTime, setPlayDur, resumeStart, RESUME_TAIL_GUARD } from '../lib/uiMemory';
+import { uiMem, setPlayTime } from '../lib/uiMemory';
 import { client } from '../api/client';
 import { cuesToSrt, parseSubtitleFile, shiftCues } from '../../engine/subtitle/parseSubtitle';
 import { buildSearchQuery, extractEp, animeTitleForQuery, normalizeTitle } from '../../engine/subtitle/normalizeQuery';
@@ -1307,13 +1307,11 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     const fromKernel = html5ResumeRef.current > 3 ? html5ResumeRef.current : 0;
     const ext = fromKernel > 0 ? fromKernel : typeof props.startTime === 'number' && props.startTime > 3 ? props.startTime : 0;
     const saved = ext > 0 ? ext : uiMem.playTime.get(url) || 0;
-    // ★ 2026-10-13：贴尾保护收敛到 resumeStart（与 MPV 内核同一口径；判据见 uiMemory.RESUME_TAIL_GUARD）
-    const at = resumeStart(saved, Number.isFinite(v.duration) ? v.duration : 0);
-    if (at > 0) {
+    if (saved > 3 && v.duration && Number.isFinite(v.duration) && saved < v.duration - 5) {
       restored = true;
       html5ResumeRef.current = 0;
       try {
-        v.currentTime = at;
+        v.currentTime = saved;
       } catch {
         /* ignore */
       }
@@ -1371,8 +1369,6 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const onDuration = () => {
     const d = v.duration;
     setDur(Number.isFinite(d) ? d : 0);
-    // ★ 2026-10-13：记下总时长（供 MPV 内核起播前判断「续播点是否已贴到片尾」；直播的 Infinity 不记）
-    if (Number.isFinite(d) && d > 0) setPlayDur(url, d);
     // ★ 2026-09-30：直播判定以「引擎给出的结论」为准（HLS = details.live；flv/ts 天生直播），
     //   时长只作兜底（原生直连的 Infinity）；否则会被 hls 直播的有限时长纠正成点播。
     setIsLive(liveKindRef.current || d === Infinity);
@@ -1611,10 +1607,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     const ext = typeof props.startTime === 'number' && props.startTime > 3 ? props.startTime : 0;
     const saved = fromKernel > 0 ? fromKernel : ext > 0 ? ext : uiMem.playTime.get(url) || 0;
     mpvResumeRef.current = 0;
-    // ★ 2026-10-13：续播点必须先过「贴尾闸门」再交给 mpv 的 `--start`。
-    //   `--start` 是**加载前**下发的，那一刻拿不到真实时长，只能用上次记录的时长（playDur）判；
-    //   首次播放（无记录）拿不到 → 由下面 mpvPush 里的运行时兜底补一刀。
-    const startAt = resumeStart(saved, uiMem.playDur.get(url) || 0);
+    const startAt = saved > 3 ? Math.round(saved) : 0;
 
     setErr('');
     setMpvErr('');
@@ -1651,21 +1644,6 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     let inFired = false;
     let outFired = false;
     let eofFired = false;
-    /**
-     * ★ 2026-10-13：续播点贴尾的**运行时兜底**（每会话只做一次）。
-     *   触发条件：起播时没有历史时长可判（首次播放该 url）、且现在拿到真实时长后发现
-     *   起播点本来就落在「距片尾 5 秒内」，且播放位置还停在起播点附近（说明刚 seek 过去、
-     *   尚未正常播动）—— 此时把位置拉回片头，与 HTML5 内核「看完不再跳」的行为一致。
-     *   之后用户自己拖到片尾不会被拉回（本标志已置位）。
-     */
-    let tailFixed = false;
-    const fixTailResume = (t: number, d: number): void => {
-      if (tailFixed || startAt <= 0 || !(d > 0)) return;
-      if (startAt < d - RESUME_TAIL_GUARD) return;
-      if (!(t >= startAt - 1)) return;
-      tailFixed = true;
-      kSeek(0);
-    };
     // 片头落在续播点之前 → 直接认定已过片头（与 html5 同口径，避免先跳片头又被续播 seek 回去）
     if (skipSegRef.current.intro > 0.5 && startAt >= skipSegRef.current.intro) inFired = true;
 
@@ -1703,18 +1681,12 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       if (st.videoW || st.videoH) mpvSizeRef.current = { w: st.videoW, h: st.videoH };
       reportResolution(st.videoW, st.videoH);
       if (st.loaded) setLoading(false);
-      const durNow = st.duration ?? 0;
-      // ★ 2026-10-13：总时长入账（下次起播前就能判「续播点是否贴尾」，见 startAt 的注释）
-      if (durNow > 0) setPlayDur(url, durNow);
       if (st.time != null) {
         setCur(st.time);
         setPlayTime(url, st.time);
-        if (!st.error) {
-          fixTailResume(st.time, durNow);
-          maybeSkipMpv(st.time, durNow);
-        }
+        if (!st.error) maybeSkipMpv(st.time, st.duration ?? 0);
       }
-      setDur(durNow);
+      setDur(st.duration ?? 0);
       setPaused(st.paused);
       setBuffering(st.buffering);
       if (st.cacheTime != null) setBuffered(st.cacheTime);
