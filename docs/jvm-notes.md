@@ -169,24 +169,26 @@ python resources/jvm/build-stubs.py resources/jvm
 
 先破除一个容易被传歪的说法：**「桩永远不抛异常」只对一部分桩成立，不是全部。**
 `resources/jvm/stubs-src/android/` 下有 **66 处 `throw new`**（最典型是
-`database/sqlite/SQLiteDatabase.java` 等抛 `SQLiteException`）。桩其实分两类：
+`resources/jvm/stubs-src/android/database/sqlite/SQLiteDatabase.java` 等抛 `SQLiteException`）。桩其实分两类：
 
 | 桩的类型 | 失败时怎么办 | 典型 |
 |---|---|---|
-| **容错 / 空壳型** | **静默降级**：返回 `null` / `false` / 空集合，让调用方自己降级 | `android/graphics/Bitmap`、`Paint`、`android/content/SharedPreferences` |
-| **真实现型**（功能真的要能用） | **照 Android SDK 语义正常抛** —— 抛异常 ≠ 桩写错了 | `android/database/sqlite/SQLiteDatabase`、`SQLiteOpenHelper` |
+| **容错 / 空壳型** | **静默降级**：返回 `null` / `false` / 空集合，让调用方自己降级 | `resources/jvm/stubs-src/android/graphics/Bitmap.java`、`resources/jvm/stubs-src/android/graphics/Paint.java`、`resources/jvm/stubs-src/android/content/SharedPreferences.java` |
+| **真实现型**（功能真的要能用） | **照 Android SDK 语义正常抛** —— 抛异常 ≠ 桩写错了 | `resources/jvm/stubs-src/android/database/sqlite/SQLiteDatabase.java`、`resources/jvm/stubs-src/android/database/sqlite/SQLiteOpenHelper.java` |
 
 > 「永不抛异常」**不是某个类独有的习惯，而是被作者显式声明为全局原则的共同取向**：
-> `resources/jvm/stubs-src/android/content/SharedPreferences.java` 原文就写着
+> `resources/jvm/stubs-src/android/content/SharedPreferences.java:76-77` 原文就写着
 > 「**设计原则（与全部桩一致）** · **永不抛异常**：读不到/写不了只降级为『内存态』，
-> 绝不能中断业务链」。同类表述还见于（路径均相对仓库根；**全文一律不标行号**，以免随代码腐坏）：
+> 绝不能中断业务链」。同类表述还见于下面这些类（路径相对仓库根，行号为写作时现读核对）：
 >
-> - `resources/jvm/stubs-src/android/graphics/Bitmap.java`（「**任何情况下都不抛异常**」）
-> - `resources/jvm/stubs-src/android/graphics/Canvas.java`（「与 Bitmap/Paint 的『宽容降级』一致……**不能抛异常**」）
-> - `resources/jvm/stubs-src/android/graphics/Paint.java`、`resources/jvm/stubs-src/android/graphics/drawable/StateListDrawable.java`
-> - `resources/jvm/stubs-src/android/os/Parcel.java`、`resources/jvm/stubs-src/android/os/Binder.java`、`resources/jvm/stubs-src/android/view/Display.java`
-> - `resources/jvm/stubs-src/android/widget/ArrayAdapter.java`、`resources/jvm/stubs-src/android/app/AlarmManager.java`
-> - `resources/jvm/stubs-src/com/github/catvod/crawler/SpiderApi.java`（「宁可返回空串也绝不抛异常」）
+> - `resources/jvm/stubs-src/android/graphics/Bitmap.java:27`（「**任何情况下都不抛异常**」；另见 `:76`、`:203`）
+> - `resources/jvm/stubs-src/android/graphics/Canvas.java:12`（「与 Bitmap/Paint 的『宽容降级』一致……**不能抛异常**」）
+> - `resources/jvm/stubs-src/android/graphics/Paint.java:7`、`resources/jvm/stubs-src/android/graphics/drawable/StateListDrawable.java:7`
+> - `resources/jvm/stubs-src/android/os/Parcel.java:14`、`resources/jvm/stubs-src/android/os/Binder.java:5`、`resources/jvm/stubs-src/android/view/Display.java:11`
+> - `resources/jvm/stubs-src/android/widget/ArrayAdapter.java:11`、`resources/jvm/stubs-src/android/app/AlarmManager.java:6`
+> - `resources/jvm/stubs-src/android/content/ContentResolver.java:8`（「不会抛异常打断蜘蛛主流程」）
+> - `resources/jvm/stubs-src/android/net/http/SslError.java:9`、`resources/jvm/stubs-src/android/webkit/ConsoleMessage.java:8`、`resources/jvm/stubs-src/android/webkit/WebResourceError.java:8`（均「getter 不抛」）
+> - `resources/jvm/stubs-src/com/github/catvod/crawler/SpiderApi.java:31`（「宁可返回空串也绝不抛异常」）
 >
 > **但它是「多数容错型桩的共同取向」，不是「全员绝对律」** —— SQLite 等真实现型桩照
 > Android 语义抛。⚠ 两种误读都要避免：
@@ -219,7 +221,7 @@ python resources/jvm/build-stubs.py resources/jvm
 | `resources/jvm/scan-stubs.py` | 扫描某个 jar 里引用到的 `android/*`、`androidx/*` 类，与 `stubs.jar` 里已有的类**对照**，标出 `MISSING`。**回答「缺哪个类」** |
 | `resources/jvm/scan-calls.py` | 从 class 常量池里提取「**类.方法名 + 描述符**」。**回答「缺哪个方法签名」** |
 
-用法（示例）：
+用法（示例；`<某个jar>` 是**占位符**，换成你要扫的目标 jar —— 例如本仓库的 `resources/jvm/stubs/stubs.jar`）：
 
 ```bash
 python resources/jvm/scan-stubs.py <某个jar>            # 默认只看 androidx
@@ -257,8 +259,8 @@ Python 版**全程在进程内完成**，只在最后调一次 `javac`。
 - 基线保留：构建会**先解出现有 `stubs.jar` 的旧内容**再合并新编译的 class，
   所以历史类（如 `com.github.catvod.*`）不会丢；基线里的 `DexNative.class` 会被**剔除**。
   > ⚠ 注意：`stubs.jar` **不含** `DexNative.class` —— 它被编译进**另一个独立的 jar**：
-  > `resources/jvm/stubs/shell-shim.jar`。出处：`build-stubs.ps1` 注释
-  > 「it builds into shell-shim.jar separately」；佐证：`tests/jvmAssets.spec.ts` 断言
+  > `resources/jvm/stubs/shell-shim.jar`。出处：`resources/jvm/stubs-src/build-stubs.ps1:46`
+  > 注释「it builds into shell-shim.jar separately」；佐证：`tests/jvmAssets.spec.ts` 断言
   > `stubs.jar` 的条目里**不含** `com/github/catvod/spider/DexNative.class`。
 
 ### 2.8 `-noverify` 与 JarRewriter 的取舍
@@ -288,8 +290,8 @@ Python 版**全程在进程内完成**，只在最后调一次 `javac`。
 
 | 错误 | 后果 | 出处（源码注释） |
 |---|---|---|
-| `interface` / `class` **选错**（与调用指令不符） | **JVM 硬崩**：`-noverify` 下会按**错误的 vtable 槽位**派发。**注意：不是 `VerifyError`** | `stubs-src/com/thegrizzlylabs/sardineandroid/Sardine.java` 注释（并记了「同类教训见 `ViewGroup$LayoutParams` 那次 JVM 硬崩」） |
-| **继承 / 类型链断裂**（该继承的父类/父接口没继承） | **`VerifyError`** | `android/widget/Button.java`（必须继承 `TextView`）、`android/view/animation/Interpolator.java`（少父接口）、`android/view/ViewManager.java`（向上转型） |
+| `interface` / `class` **选错**（与调用指令不符） | **JVM 硬崩**：`-noverify` 下会按**错误的 vtable 槽位**派发。**注意：不是 `VerifyError`** | `resources/jvm/stubs-src/com/thegrizzlylabs/sardineandroid/Sardine.java:37-40` 注释（并记了「同类教训见 `ViewGroup$LayoutParams` 那次 JVM 硬崩」） |
+| **继承 / 类型链断裂**（该继承的父类/父接口没继承） | **`VerifyError`** | `resources/jvm/stubs-src/android/widget/Button.java:14-16`（必须继承 `TextView`）、`resources/jvm/stubs-src/android/view/animation/Interpolator.java:11`（少父接口）、`resources/jvm/stubs-src/android/view/ViewManager.java:12`（向上转型） |
 
 > 关键限定：**`VerifyError` 是字节码校验错误，只在「校验开启」时才会出现**。
 > 运行器默认带 `-noverify`（§2.8）**恰恰是为了规避** dex2jar 产物的 `VerifyError`
@@ -311,8 +313,8 @@ Python 版**全程在进程内完成**，只在最后调一次 `javac`。
   > ⚠「结尾调用 `Runtime.halt(n)`，否则进程挂住不退出」是**手工经验，未在仓库留档**；
   > `run-spider.sh` 里并没有这一句。仓库里唯一的 `Runtime.halt` 出现在
   > `scripts/build-jre.mjs` 的 JCE / 字符集探针里，用途与「跑 wex」无关。
-- `-cp` 路径在 **MSYS / Git Bash** 下要当心**路径被改写**。这一点 `stubs-src/build-stubs.sh`
-  头部有明确记载：「MSYS 会把 `/c/...` 转成 `C:\...`，但会把 `@/tmp/files.txt` 里的
+- `-cp` 路径在 **MSYS / Git Bash** 下要当心**路径被改写**。这一点
+  `resources/jvm/stubs-src/build-stubs.sh:9-13` 有明确记载：「MSYS 会把 `/c/...` 转成 `C:\...`，但会把 `@/tmp/files.txt` 里的
   POSIX 路径原样传过去导致『找不到文件』」；`run-spider.sh` 的做法是
   **统一用 `cygpath -w` 转成 Windows 风格路径**。
   ⇒ 手工拼 `-cp` 时，**照 `run-spider.sh` 用 `cygpath -w`**（或直接写 `C:/...` 形式）。
