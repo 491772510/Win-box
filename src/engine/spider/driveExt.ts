@@ -24,6 +24,11 @@ const DRIVE_EXT_ALIASES: Record<string, string[]> = {
   [ALI_KEY]: ['token'],
 };
 
+/** Keys that this host may have injected into a source ext in an earlier snapshot. */
+const MANAGED_DRIVE_KEYS = new Set([
+  'ali', 'alipan', 'quark', 'uc', 'baidu', 'pan', 'pansou', '115', 'xunlei', '189', '123', 'pikpak',
+]);
+
 /**
  * 归一 DriveStore 快照：
  * - 过滤空值/非字符串（与 mergeDriveTokens 的旧过滤语义一致）
@@ -33,13 +38,18 @@ const DRIVE_EXT_ALIASES: Record<string, string[]> = {
 export function normalizeDriveTokens(tokens: Record<string, string> | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (!tokens) return out;
+  const hasCanonicalAli = Object.keys(tokens).some((k) => k.trim().toLowerCase() === ALI_KEY);
   for (const [k, v] of Object.entries(tokens)) {
+    const key = k.trim().toLowerCase();
+    if (key === ALIPAN_ALIAS_KEY && hasCanonicalAli) continue;
     if (typeof v !== 'string' || v.trim().length === 0) continue;
-    out[k.trim().toLowerCase()] = v.trim();
-  }
-  if (out[ALIPAN_ALIAS_KEY] !== undefined) {
-    if (out[ALI_KEY] === undefined) out[ALI_KEY] = out[ALIPAN_ALIAS_KEY];
-    delete out[ALIPAN_ALIAS_KEY];
+    // Keep the current `ali` value authoritative even when a legacy
+    // `alipan` entry happens to be enumerated first.
+    if (key === ALIPAN_ALIAS_KEY) {
+      if (out[ALI_KEY] === undefined) out[ALI_KEY] = v.trim();
+      continue;
+    }
+    out[key] = v.trim();
   }
   return out;
 }
@@ -52,21 +62,49 @@ export function normalizeDriveTokens(tokens: Record<string, string> | undefined)
  *   + 按别名表补齐生态别名键（仅当 ext 未定义该键时，不覆盖源作者配置）
  * - ext 为空或非 JSON → 原样透传（不臆造蜘蛛不认识的格式）
  */
-export function mergeDriveTokens(ext: string, tokens: Record<string, string> | undefined): string {
+export function mergeDriveTokens(
+  ext: string,
+  tokens: Record<string, string> | undefined,
+  previousInjectedTokens?: Record<string, string>,
+): string {
   const normalized = normalizeDriveTokens(tokens);
-  const entries = Object.entries(normalized);
-  if (entries.length === 0) return ext;
   if (!ext.trim()) return ext; // 蜘蛛未声明 ext 需要时不强塞（避免改变蜘蛛行为）
   try {
     const obj = JSON.parse(ext) as unknown;
     if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
       const rec = obj as Record<string, unknown>;
-      for (const [k, v] of entries) rec[k] = v;
+      const oldProviderValues = new Map<string, unknown>();
+      for (const provider of Object.keys(DRIVE_EXT_ALIASES)) {
+        if (Object.prototype.hasOwnProperty.call(rec, provider)) oldProviderValues.set(provider, rec[provider]);
+      }
+      // The source's original provider keys are still part of `ext` on every
+      // call. They must survive when no application binding exists; otherwise
+      // an unbound source such as csp_Quark loses its own configuration. The
+      // caller may provide a previous host-injected snapshot when it keeps a
+      // merged ext, allowing those stale values to be removed deterministically.
+      const previousInjected = normalizeDriveTokens(previousInjectedTokens);
+      for (const key of MANAGED_DRIVE_KEYS) {
+        if (previousInjected[key] !== undefined && rec[key] === previousInjected[key]) delete rec[key];
+      }
+      for (const [provider, aliases] of Object.entries(DRIVE_EXT_ALIASES)) {
+        const oldValue = oldProviderValues.get(provider);
+        const aliasWasHostValue = aliases.some((alias) =>
+          Object.prototype.hasOwnProperty.call(rec, alias) && rec[alias] === oldValue,
+        );
+        for (const alias of aliases) {
+          // An alias equal to the old provider value was injected by this
+          // host. A different value belongs to the source author and survives
+          // unbinding or refresh.
+          if (Object.prototype.hasOwnProperty.call(rec, alias) && rec[alias] === oldValue) delete rec[alias];
+        }
+        if (normalized[provider] === undefined && aliasWasHostValue) delete rec[provider];
+      }
+      for (const [k, v] of Object.entries(normalized)) rec[k] = v;
       for (const [provider, aliases] of Object.entries(DRIVE_EXT_ALIASES)) {
         const val = normalized[provider];
         if (val === undefined) continue;
         for (const alias of aliases) {
-          if (rec[alias] === undefined) rec[alias] = val;
+          if (!Object.prototype.hasOwnProperty.call(rec, alias)) rec[alias] = val;
         }
       }
       return JSON.stringify(rec);
@@ -75,6 +113,24 @@ export function mergeDriveTokens(ext: string, tokens: Record<string, string> | u
     /* 非 JSON ext 原样透传 */
   }
   return ext;
+}
+
+/**
+ * Cloud-drive 配置是另一种由 jar 直接读取的凭据快照。
+ * 保留其它用户配置，但网盘凭据键必须完全由当前绑定状态决定，
+ * 否则解绑后旧 Cookie 仍会被 fty 系 jar 当成有效登录态。
+ */
+export function mergeCloudDriveTokens(
+  existing: Record<string, unknown> | undefined,
+  tokens: Record<string, string> | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(existing || {}) };
+  const normalized = normalizeDriveTokens(tokens);
+  delete out.quarkCookie;
+  delete out.ucCookie;
+  if (normalized.quark !== undefined) out.quarkCookie = normalized.quark;
+  if (normalized.uc !== undefined) out.ucCookie = normalized.uc;
+  return out;
 }
 
 /**

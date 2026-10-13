@@ -272,10 +272,16 @@ export function removeWexHostPref(provider: string, sandboxDir: string): void {
  */
 export function syncWexCookieFiles(tokens: Record<string, string>, sandboxDir: string): string[] {
   const written: string[] = [];
-  for (const [p, v] of Object.entries(tokens || {})) {
-    if (typeof v !== 'string' || !v.trim()) continue;
-    const path = writeWexCookieFile(p, v, sandboxDir);
-    if (path) written.push(path);
+  for (const provider of Object.keys(WEX_COOKIE_FILES)) {
+    const value = tokens?.[provider];
+    if (typeof value === 'string' && value.trim()) {
+      const path = writeWexCookieFile(provider, value, sandboxDir);
+      if (path) written.push(path);
+    } else {
+      // Full sync semantics: a removed/empty credential must not leave a stale
+      // cookie that makes a later JVM appear authenticated with old data.
+      removeWexCookieFile(provider, sandboxDir);
+    }
   }
   return written;
 }
@@ -286,10 +292,26 @@ export function syncWexCookieFiles(tokens: Record<string, string>, sandboxDir: s
  */
 export function syncPizazzCookieFiles(tokens: Record<string, string>, tmp = tmpdir()): string[] {
   const written: string[] = [];
-  for (const [p, v] of Object.entries(tokens || {})) {
-    if (typeof v !== 'string' || !v.trim()) continue;
-    const path = writePizazzCookieFile(p, v, tmp);
+  const normalized: Record<string, string> = {};
+  for (const [rawProvider, rawValue] of Object.entries(tokens || {})) {
+    const provider = rawProvider.trim().toLowerCase() === 'alipan' ? 'ali' : rawProvider.trim().toLowerCase();
+    if (provider === 'ali') {
+      // A present canonical `ali` key wins even when it is empty. This lets
+      // an explicit unbind remove a legacy `alipan` file deterministically.
+      if (rawProvider.trim().toLowerCase() === 'ali' || normalized[provider] === undefined) {
+        normalized[provider] = typeof rawValue === 'string' ? rawValue : '';
+      }
+    } else if (typeof rawValue === 'string') {
+      normalized[provider] = rawValue;
+    }
+  }
+  // Iterate the known file set rather than the input object so removed or empty
+  // credentials cannot leave a stale cookie that a jar treats as authenticated.
+  for (const provider of [...new Set(Object.keys(PIZAZZ_COOKIE_FILES).map((p) => p === 'alipan' ? 'ali' : p))]) {
+    const value = normalized[provider] || '';
+    const path = value ? writePizazzCookieFile(provider, value, tmp) : '';
     if (path) written.push(path);
+    if (!value) removePizazzCookieFile(provider, tmp);
   }
   return written;
 }

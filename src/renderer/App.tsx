@@ -15,7 +15,7 @@ import LivePage from './pages/LivePage';
 import StoragePage from './pages/StoragePage';
 import HistoryPage from './pages/HistoryPage';
 import AboutPage from './pages/AboutPage';
-/** ★ 2026-09-29：启动强制更新门禁（本地版本低于 GitHub 最新 Release 时遮挡全界面） */
+/** ★ 2026-09-29：启动更新提示（本地版本低于 GitHub 最新 Release 时由用户决定是否更新） */
 import UpdateGate from './components/UpdateGate';
 import { loadUiMemory, sameEpProgress, saveUiMemory, markHistoryOnlyWriter } from './lib/uiMemory';
 // ★ 2026-09-30（用户要求）：显式绑定第三方播放器时点播直接由它播放（详见 lib/externalPlay.ts）

@@ -151,6 +151,20 @@ describe('UserConfigManager — 增删改排序与选中', () => {
     expect(m.sources().map((s) => s.key)).toEqual(['a']);
   });
 
+  it('deleteSources 一次删除多个源，并只触发一次 content 变更', () => {
+    const m = newManager(tmpDir());
+    m.addSource(bean('a'));
+    m.addSource(bean('b'));
+    m.addSource(bean('c'));
+    m.setActiveSource('b');
+    const kinds: string[] = [];
+    m.setOnChange((_snap, kind) => kinds.push(kind));
+    m.deleteSources(['a', 'b', 'missing']);
+    expect(m.sources().map((s) => s.key)).toEqual(['c']);
+    expect(m.activeSourceKey()).toBe('');
+    expect(kinds).toEqual(['content']);
+  });
+
   it('moveSource：up/down/top/bottom 排序正确；边界 no-op 不抛', () => {
     const m = newManager(tmpDir());
     m.addSource(bean('a'));

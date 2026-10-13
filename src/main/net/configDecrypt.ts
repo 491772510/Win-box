@@ -6,7 +6,7 @@
 //   因此无法照搬实现。用户明确要求：不要做成可选项开关，直接把「解密」当最后一档兜底。
 //
 // 本模块两级兜底（都是"最后手段"，只有在「伪装阶梯全部失败」后才会走到）：
-//   ① **本地可解释编码**：整体 base64 / hex 的配置（社区很常见）直接解出来当文本用 —— 不联网、零风险；
+//   ① **本地可解释编码/封装**：整体 base64 / hex，以及携带 key/IV 的 2423 AES-CBC 封装；不联网；
 //   ② **远程解密服务**：把**原始订阅地址**交给 `jiemi.php` 取回明文。
 //      ⚠️ 隐私口径（如实记录，勿删）：这一档会把订阅地址发给第三方服务，因此
 //         · 仅在 ①② 之外的常规手段**全部失败**时触发；
@@ -14,6 +14,7 @@
 import type { HttpClient, Logger } from '../../shared/types';
 import { looksLikeSubscribeJson } from '../../engine/config/ApiConfigParser';
 import { sniffBody } from '../../engine/util/fetchWithDisguise';
+import { createDecipheriv } from 'node:crypto';
 
 /** 远程解密服务（饭太硬「全能接口解密」的后端；仅作最后兜底） */
 export const REMOTE_DECRYPT_ENDPOINT = 'https://www.xn--sss604efuw.cc/jm/jiemi.php';
@@ -27,10 +28,37 @@ export function stripLineComments(text: string): string {
     .trim();
 }
 
-/** 本地可解释编码：整体 base64/hex → 解成文本（解不出/不是 JSON 返回 null；纯函数） */
-export function decodeLocalCipher(raw: string): { text: string; how: 'base64' | 'hex' } | null {
+/**
+ * Android subscription wire format: hex($#key#$ + CBC ciphertext + 13-byte IV).
+ * Key/IV are ASCII, lowercased and right-padded with '0' to 16 bytes. Only
+ * self-contained envelopes are accepted; this does not guess external keys.
+ */
+function decodeCbcEnvelope(hex: string): string | null {
+  if (!/^2423[0-9a-f]+$/i.test(hex) || hex.length % 2 !== 0) return null;
+  const bytes = Buffer.from(hex, 'hex');
+  const headerEnd = bytes.indexOf(Buffer.from('#$'), 2);
+  const bodyStart = headerEnd + 2;
+  const bodyEnd = bytes.length - 13;
+  const keyBytes = bytes.subarray(2, headerEnd);
+  const ivBytes = bytes.subarray(bodyEnd);
+  if (headerEnd < 3 || keyBytes.length > 16 || bodyEnd <= bodyStart ||
+      (bodyEnd - bodyStart) % 16 !== 0 || ivBytes.length !== 13 ||
+      !/^[\x20-\x7e]+$/.test(keyBytes.toString('latin1')) ||
+      !/^[\x20-\x7e]{13}$/.test(ivBytes.toString('latin1'))) return null;
+  try {
+    const key = Buffer.from(keyBytes.toString('ascii').toLowerCase().padEnd(16, '0'), 'ascii');
+    const iv = Buffer.from(ivBytes.toString('ascii').toLowerCase().padEnd(16, '0'), 'ascii');
+    const decipher = createDecipheriv('aes-128-cbc', key, iv);
+    return Buffer.concat([decipher.update(bytes.subarray(bodyStart, bodyEnd)), decipher.final()]).toString('utf8');
+  } catch { return null; }
+}
+
+/** 本地解码（解不出/不是订阅 JSON 返回 null；无网络副作用）。 */
+export function decodeLocalCipher(raw: string): { text: string; how: 'base64' | 'hex' | 'aes-cbc' } | null {
   const s = stripLineComments(raw).replace(/\s+/g, '');
   if (s.length < 64) return null;
+  const cbc = decodeCbcEnvelope(s);
+  if (cbc && looksLikeSubscribeJson(cbc)) return { text: cbc, how: 'aes-cbc' };
   const kind = sniffBody(Buffer.from(s, 'utf-8')).kind;
   // hex 优先，其次 base64 —— 两者的字符集有重叠（hex ⊆ base64），两种都试一遍最稳
   const tries: Array<'hex' | 'base64'> = kind === 'base64' ? ['base64', 'hex'] : ['hex', 'base64'];
@@ -48,7 +76,7 @@ export function decodeLocalCipher(raw: string): { text: string; how: 'base64' | 
 export interface DecryptOutcome {
   text: string;
   /** 用了哪一档（写日志/诊断用） */
-  how: 'local-base64' | 'local-hex' | 'remote-jiemi';
+  how: 'local-base64' | 'local-hex' | 'local-aes-cbc' | 'remote-jiemi';
 }
 
 /**
@@ -65,7 +93,7 @@ export async function tryDecryptConfig(
   const local = decodeLocalCipher(rawText);
   if (local) {
     logger?.i(`订阅解密兜底：本地 ${local.how} 解码成功（${local.text.length}B）`);
-    return { text: local.text, how: local.how === 'base64' ? 'local-base64' : 'local-hex' };
+    return { text: local.text, how: local.how === 'aes-cbc' ? 'local-aes-cbc' : local.how === 'base64' ? 'local-base64' : 'local-hex' };
   }
   if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return null;
   try {

@@ -2,10 +2,16 @@
 // ★ 2026-09-29：订阅「解密兜底」回归（用户口径：不做开关，用解密兜底）。
 //   本模块两档：① 本地 base64/hex 解码（不联网）；② 第三方解密服务（只在①失败且地址可用时）。
 import { describe, it, expect } from 'vitest';
+import { createCipheriv } from 'node:crypto';
 import type { HttpClient, HttpRequest, HttpResponse } from '../src/shared/types';
 import { decodeLocalCipher, stripLineComments, tryDecryptConfig, REMOTE_DECRYPT_ENDPOINT } from '../src/main/net/configDecrypt';
 
 const json = '{"sites":[{"key":"a","name":"A","api":"csp_A"}]}';
+
+function cbcEnvelope(text: string, key = '1234567890123', iv = '1234567890123'): string {
+  const cipher = createCipheriv('aes-128-cbc', Buffer.from(key.toLowerCase().padEnd(16, '0')), Buffer.from(iv.toLowerCase().padEnd(16, '0')));
+  return Buffer.concat([Buffer.from('$#' + key + '#$'), cipher.update(text, 'utf8'), cipher.final(), Buffer.from(iv)]).toString('hex');
+}
 
 function fakeHttp(resp: Partial<HttpResponse> | Error, ok = true): { http: HttpClient; calls: HttpRequest[] } {
   const calls: HttpRequest[] = [];
@@ -34,6 +40,21 @@ describe('stripLineComments — 去掉 `//` 横幅', () => {
 });
 
 describe('decodeLocalCipher — 本地编码优先（不联网）', () => {
+  it('2423 CBC 封装携带 key/IV，本地还原中文订阅', () => {
+    const text = '{"sites":[{"key":"玩偶","name":"中文源","api":"csp_Wogg"}]}';
+    const envelope = cbcEnvelope(text, 'AbCd123', 'ABCD123456789');
+    expect(decodeLocalCipher('// banner\n' + envelope.toUpperCase().match(/.{1,32}/g)!.join('\n'))).toEqual({ text, how: 'aes-cbc' });
+  });
+
+  it('CBC 缺标记、奇数 hex、无效块长、超长 key、坏 padding 或非订阅均拒绝', () => {
+    const envelope = cbcEnvelope(json);
+    const bytes = Buffer.from(envelope, 'hex');
+    bytes[bytes.length - 14] ^= 0xff;
+    for (const bad of [envelope.slice(1), envelope.slice(0, -2), '2423' + '00'.repeat(80), bytes.toString('hex'),
+      cbcEnvelope('not a subscription'), '2423' + Buffer.from('x'.repeat(17) + '#$').toString('hex') + envelope.slice(34)]) {
+      expect(decodeLocalCipher(bad)).toBeNull();
+    }
+  });
   it('整体 base64 的配置能解出（社区常见做法）', () => {
     const b64 = Buffer.from(json, 'utf-8').toString('base64');
     expect(decodeLocalCipher(b64)).toEqual({ text: json, how: 'base64' });
@@ -56,6 +77,11 @@ describe('decodeLocalCipher — 本地编码优先（不联网）', () => {
 });
 
 describe('tryDecryptConfig — 两级兜底', () => {
+  it('CBC 本地解开，不发送订阅地址给第三方', async () => {
+    const { http, calls } = fakeHttp({ content: '' });
+    expect(await tryDecryptConfig(http, 'https://a.b/sun.json', cbcEnvelope(json))).toEqual({ text: json, how: 'local-aes-cbc' });
+    expect(calls).toHaveLength(0);
+  });
   it('本地能解 → 直接用本地结果，**不请求第三方**', async () => {
     const { http, calls } = fakeHttp({ content: '' });
     const b64 = Buffer.from(json, 'utf-8').toString('base64');

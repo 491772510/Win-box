@@ -24,7 +24,7 @@ import { JsonStore } from './store/JsonStore';
 import { LocalPkgStore } from './store/LocalPkgStore';
 import { LOCAL_PROXY_BASE } from '../shared/constants';
 import { IPC } from '../shared/ipc-channels';
-import { localImportsDir, userDataDir } from './util/paths';
+import { legacyLocalImportsDir, localImportsDir, userDataDir } from './util/paths';
 import { safeStorageDriveCodec } from './util/driveCodec';
 import { installApplicationMenu } from './menu';
 import { restartApp, setSoftRestartHandler, shouldDeferQuitCleanup } from './util/appRestart';
@@ -115,7 +115,7 @@ const dav = new DavService(
 /** ★ 2026-09-29 DLNA 投屏（SSDP 发现 + AVTransport 三动作；对位 CatClaw Dlna.cs = TVBox osc/dlna） */
 const dlna = new DlnaService(fileLogger);
 /**
- * ★ 2026-09-29 启动强制更新：本地版本低于 GitHub 最新 Release 时强制更新（不更新不可用）——
+ * ★ 2026-09-29 启动更新检查：本地版本低于 GitHub 最新 Release 时提示用户选择——
  *   查 `api.github.com`（失败不锁死）→ 代理加速下载 Setup → 拉起安装程序并退出本程序。
  */
 const updater = new UpdateService(fileLogger);
@@ -123,7 +123,12 @@ const updater = new UpdateService(fileLogger);
  * ★ 2026-09-29（用户要求）本地包（影视壳/影视仓 目录包）：登记表 + `/pkg` 资源路由 + py 就地运行。
  *   导入安装目录下的 imports 副本，原始包可移动/删除，不影响已导入订阅。
  */
-const localPkgs = new LocalPkgStore(new JsonStore(join(userDataDir(), 'local-pkgs.json')), LOCAL_PROXY_BASE, localImportsDir());
+const localPkgs = new LocalPkgStore(
+  new JsonStore(join(userDataDir(), 'local-pkgs.json')),
+  LOCAL_PROXY_BASE,
+  localImportsDir(),
+  legacyLocalImportsDir(),
+);
 const proxy = new LocalProxyServer(
   fileLogger,
   () => host.driveList(),
@@ -391,6 +396,14 @@ app.whenReady().then(async () => {
   } catch (e) {
     fileLogger.w('播放诊断初始化失败：' + (e as Error).message);
   }
+  // ★ 网盘会话必须在蜘蛛预热前准备好：夸克 member 接口会补发新版 __puus，
+  //   而 Pizazz/fty 蜘蛛在 init 时只读一次 cookie。失败时保留旧凭据并继续启动。
+  try { host.syncDriveFiles(); } catch { /* 同步失败不影响启动 */ }
+  try { await host.refreshDriveSessions(); } catch (e) {
+    fileLogger.w('网盘会话刷新失败（保留现有绑定）：' + (e as Error).message);
+  }
+  try { host.syncDriveFiles(); } catch { /* 同步失败不影响启动 */ }
+  host.enablePrewarm();
   registerIpc(host, dav, dlna, updater, localPkgs);
   // 老板键：注入窗口提供者（主窗口 + 播放器窗口）并按上次设置注册全局快捷键
   bossKey.start(() => {
@@ -410,10 +423,6 @@ app.whenReady().then(async () => {
   createWindow();
   // ★ 启动时自动订阅刷新（≥7 天一次，静默后台执行，失败仅记日志）
   void host.maybeAutoRefreshSubscriptions();
-  // ★ 启动时把已绑定网盘凭据同步为 jar 系期望的 cookie 文件（%TEMP% 可能被系统清理；
-  //   缺失会让 Pizazz 系源的详情播放列表被降级为空 / fty 系取流失败）
-  try { host.syncDriveFiles(); } catch { /* 同步失败不影响启动 */ }
-
   app.on('activate', () => {
     // ★ 2026-10-12（macOS 适配 P0-10 / P1-3）：Dock 图标点击（以及 Cmd+Tab 切回）时
     //   必须能**重建主窗口** —— macOS 关窗不退出，应用常驻 Dock；没有窗口又建不出来

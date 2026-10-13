@@ -30,19 +30,30 @@ const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const tag = `release${pkg.version}`;
 const repo = 'yagami-hue/Win-box';
 const output = resolve(root, pkg.build.directories.output);
-// ★ 2026-10-12（macOS 适配 · T04）：Windows 分支的筛选条件一字不改，
+// electron-builder normalizes numeric version components when it creates the
+// artifact name (for example, package version 1.21.01 becomes 1.21.1).
+const artifactVersions = [...new Set([
+  pkg.version,
+  String(pkg.version).split('.').map(part => /^\d+$/.test(part) ? String(Number(part)) : part).join('.'),
+])];
+// ★ 2026-10-12（macOS 适配 · T04）：Windows 的 Setup / 便携两种命名一字不改，
 //   额外并列支持 macOS 的 dmg（架构命名 Win-Box-<version>-arm64.dmg / -x64.dmg）。
-const winInstaller = name => name === `Win-Box Setup ${pkg.version}.exe` || name === `Win-Box ${pkg.version}.exe`;
-const macInstaller = name =>
-  name === `Win-Box-${pkg.version}-arm64.dmg` ||
-  name === `Win-Box-${pkg.version}-x64.dmg` ||
-  name === `Win-Box-${pkg.version}.dmg`;
+// ★ 2026-10-13（合并上游）：dmg 同样按归一后的版本号匹配（1.21.01 → 1.21.1）。
+const winInstallers = new Set(artifactVersions.flatMap(version => [
+  `Win-Box Setup ${version}.exe`,
+  `Win-Box ${version}.exe`,
+]));
+const macInstallers = new Set(artifactVersions.flatMap(version => [
+  `Win-Box-${version}-arm64.dmg`,
+  `Win-Box-${version}-x64.dmg`,
+  `Win-Box-${version}.dmg`,
+]));
 const assets = readdirSync(output, { withFileTypes: true })
   .filter(e => {
     if (!e.isFile()) return false;
     const lower = e.name.toLowerCase();
-    if (lower.endsWith('.exe')) return winInstaller(e.name);
-    if (lower.endsWith('.dmg')) return macInstaller(e.name);
+    if (lower.endsWith('.exe')) return winInstallers.has(e.name);
+    if (lower.endsWith('.dmg')) return macInstallers.has(e.name);
     return false;
   })
   .map(e => ({ path: join(output, e.name), mac: e.name.toLowerCase().endsWith('.dmg') }));
@@ -53,7 +64,8 @@ if (!assets.length) {
   process.exit(1);
 }
 console.log(`Release: ${repo} / ${tag}`);
-for (const asset of assets) console.log(`Installer(${asset.mac ? 'darwin' : 'win32'}): ${asset.path}`);
+// ★ 平台写在括号里 —— 「Installer:」字面量是 tests/releaseUpload.spec.ts 的断言锚点，勿改。
+for (const asset of assets) console.log(`Installer: ${asset.path} (${asset.mac ? 'darwin' : 'win32'})`);
 if (args.includes('--dry-run')) {
   console.log('Dry run: no files uploaded. Only .exe / .dmg installers are selected.');
 } else {

@@ -19,12 +19,20 @@ export function userDataDir(): string {
  *
  * ★ 2026-10-12（macOS 适配 P0-8）：darwin 下**绝不能落在 `.app` 内部** ——
  *   `dirname(app.getPath('exe'))` = `<App>/Contents/MacOS`，往里写会破坏签名密封
- *   （Gatekeeper 直接判「已损坏」）。macOS 一律走 `userData/imports`
- *   （= `~/Library/Application Support/Win-Box/imports`）。
- *   Windows 分支（便携版 PORTABLE_EXECUTABLE_DIR / 安装目录 / 开发态）逻辑一字不动。
+ *   （Gatekeeper 直接判「已损坏」）。故一律走 `userData/imports`
+ *   （macOS 上 = `~/Library/Application Support/Win-Box/imports`）。
+ *
+ * ★ 2026-10-13（合并上游 1.21.2）：**两个平台统一走 userData** —— 安装目录可能只读
+ *   （或被安全软件保护），放在 exe 旁的 .py 会在下次请求前被隔离。
+ *   这与上面的 macOS 约束恰好一致（darwin 的 userData 同样不在 .app 内），
+ *   因此不再需要按平台分支。旧位置由 `legacyLocalImportsDir()` 保留，供迁移读取。
  */
 export function localImportsDir(): string {
-  if (isMac()) return join(app.getPath('userData'), 'imports');
+  return join(userDataDir(), 'imports');
+}
+
+/** Previous location used by builds before local imports moved to userData. */
+export function legacyLocalImportsDir(): string {
   const installDir = app.isPackaged
     ? process.env.PORTABLE_EXECUTABLE_DIR || dirname(app.getPath('exe'))
     : app.getAppPath();

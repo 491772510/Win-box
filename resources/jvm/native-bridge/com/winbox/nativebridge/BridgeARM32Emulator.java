@@ -129,18 +129,16 @@ public final class BridgeARM32Emulator extends AndroidARMEmulator {
             if (!(target instanceof CounterFile)) return -95; // EOPNOTSUPP
             PollFile poll = (PollFile) descriptor;
             poll.prune();
-            RegistrationKey key = new RegistrationKey(fd, ((CounterFile) target).state);
+            RegistrationKey key = new RegistrationKey(fd, target);
             Registration previous = poll.registrations.get(key);
             if (operation == 1 && previous != null) return -17; // EEXIST
             if (operation != 1 && previous == null) return -2; // ENOENT
             if (operation == 2) { poll.registrations.remove(key); return 0; }
             Pointer event = ctx.getPointerArg(3);
             if (event == null) return -14;
-            // SocketIO.canRead() defaults to true in unidbg, not real socket
-            // readiness. Refuse those targets until a nonblocking transport exists.
             int mask = event.getInt(0);
             if ((mask & ~(1 | 4 | 8 | 16 | 0x40000000 | 0x80000000)) != 0) return -95;
-            poll.registrations.put(key, new Registration((CounterFile) target, mask, event.getLong(8)));
+            poll.registrations.put(key, new Registration(target, mask, event.getLong(8)));
             return 0;
         }
 
@@ -191,18 +189,26 @@ public final class BridgeARM32Emulator extends AndroidARMEmulator {
         }
 
         private static final class Registration {
-            final CounterFile file;
+            final AndroidFileIO file;
             final int mask;
             final long data;
             long readEpoch = -1, writeEpoch = -1;
             boolean disabled;
-            Registration(CounterFile file, int mask, long data) { this.file = file; this.mask = mask; this.data = data; }
+            Registration(AndroidFileIO file, int mask, long data) { this.file = file; this.mask = mask; this.data = data; }
             int ready() {
                 if (disabled) return 0;
                 boolean edge = (mask & 0x80000000) != 0;
                 int bits = 0;
-                if ((mask & 1) != 0 && file.canRead() && (!edge || readEpoch != file.state.readEpoch)) bits |= 1;
-                if ((mask & 4) != 0 && file.state.value != CounterFile.MAX && (!edge || writeEpoch != file.state.writeEpoch)) bits |= 4;
+                boolean readable = file instanceof CounterFile
+                        ? ((CounterFile) file).canRead()
+                        : file instanceof TcpSocket && SocketReadiness.readable((TcpSocket) file);
+                boolean writable = file instanceof CounterFile
+                        ? ((CounterFile) file).state.value != CounterFile.MAX
+                        : file instanceof TcpSocket && SocketReadiness.writable((TcpSocket) file);
+                long readNow = file instanceof CounterFile ? ((CounterFile) file).state.readEpoch : SocketReadiness.epoch((TcpSocket) file, true);
+                long writeNow = file instanceof CounterFile ? ((CounterFile) file).state.writeEpoch : SocketReadiness.epoch((TcpSocket) file, false);
+                if ((mask & 1) != 0 && readable && (!edge || readEpoch != readNow)) bits |= 1;
+                if ((mask & 4) != 0 && writable && (!edge || writeEpoch != writeNow)) bits |= 4;
                 return bits;
             }
         }

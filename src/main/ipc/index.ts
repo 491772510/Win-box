@@ -186,6 +186,7 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
   registerHandler(IPC.CFG_UPDATE_SOURCE, (_e: any, a: { key: string; patch: SourceUpdatePatch }) =>
     host.cfgUpdateSource(a.key, a.patch || {}), log);
   registerHandler(IPC.CFG_DELETE_SOURCE, (_e: any, key: string) => host.cfgDeleteSource(key), log);
+  registerHandler(IPC.CFG_DELETE_SOURCES, (_e: any, keys: string[]) => host.cfgDeleteSources(Array.isArray(keys) ? keys : []), log);
   registerHandler(IPC.CFG_MOVE_SOURCE, (_e: any, a: { key: string; direction: SourceMoveDirection }) =>
     host.cfgMoveSource(a.key, a.direction), log);
   registerHandler(IPC.CFG_SET_ACTIVE_SOURCE, (_e: any, key: string) => host.cfgSetActiveSource(key), log);
@@ -414,28 +415,37 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
    *
    * 包内 html（homePage 网页源）由 /pkg 路由提供，点播页「网页」入口在独立窗口打开（fm 桥，见 WebHomeWindow）。
    */
-  registerHandler(IPC.CFG_IMPORT_PACKAGE, async (e: any, customName?: string): Promise<{
-    ok: boolean; root?: string; rel?: string; sites?: number; name?: string; error?: string;
+  registerHandler(IPC.CFG_IMPORT_PACKAGE, async (e: any, args?: { name?: string; root?: string }): Promise<{
+    ok: boolean; root?: string; rel?: string; sites?: number; name?: string; needsName?: boolean; error?: string;
     warnings?: string[];
     result?: { config: SiteConfig; report: ImportReport; warnings: string[]; urls?: MultiConfigEntry[] };
   }> => {
     const win = winOf(e);
-    const picked = await dialog.showOpenDialog(win ?? undefined!, {
-      properties: ['openDirectory'],
-      title: '选择本地包目录（含 影视.json 与 py/js/html/jar 等子目录）',
-    });
-    if (picked.canceled || !picked.filePaths?.[0]) return { ok: false }; // 用户取消，不视为错误
-    const root = picked.filePaths[0];
+    let root = args?.root || '';
+    if (!root) {
+      const picked = await dialog.showOpenDialog(win ?? undefined!, {
+        properties: ['openDirectory'],
+        title: '选择本地包目录（支持仅含 .py 文件的文件夹，自动生成订阅 JSON）',
+      });
+      if (picked.canceled || !picked.filePaths?.[0]) return { ok: false }; // 用户取消，不视为错误
+      root = picked.filePaths[0];
+    }
     let importedUrl = '';
     try {
-      const found = pkgs.importSubscription(root);
+      const inspected = pkgs.inspectSubscription(root);
+      // 纯 Python 文件夹每次都需要用户确认/输入生成文件名；第一次调用只
+      // 返回待命名信息，不创建副本，第二次带 root + name 才真正导入。
+      if (inspected?.generated && (!args?.root || !args?.name?.trim())) {
+        return { ok: false, needsName: true, root, sites: inspected.sites };
+      }
+      const found = pkgs.importSubscription(root, args?.name);
       if (!found) {
         return {
           ok: false,
-          error: '该目录下没找到可用的订阅 JSON：请选择含 影视.json（或含 sites 的 .json）的包目录',
+          error: '该目录下没找到订阅 JSON 或可导入的 .py 文件：请选择含 影视.json（或含 sites 的 .json）的本地包，或包含 Python 源脚本的文件夹',
         };
       }
-      const name = nameFromLocalFile(root, customName); // 默认取包目录名
+      const name = nameFromLocalFile(root, args?.name); // 默认取包目录名
       const url = importedUrl = pkgSubUrl(found.index, found.rel);
       const r = await host.importConfig({ url, name });
       return {
@@ -725,7 +735,7 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
   registerHandler(IPC.DLNA_CAST, (_e: any, a: { device: DlnaDevice; target: DlnaCastTarget }) =>
     dlna.cast(a?.device, a?.target || ({ url: '', name: '', positionMs: 0 } as DlnaCastTarget)), log);
 
-  // ★ 2026-09-29 启动强制更新：检查（失败不锁死）→ 代理加速下载 Setup（进度推送）→ 拉起安装程序
+  // ★ 2026-09-29 启动更新：检查（失败不影响使用）→ 用户确认后代理加速下载 Setup（进度推送）→ 拉起安装程序
   registerHandler(IPC.UPDATE_CHECK, () => updater.check(), log);
   registerHandler(IPC.UPDATE_DOWNLOAD, async () => {
     const push = (p: UpdateProgress): void => {

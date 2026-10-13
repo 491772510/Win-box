@@ -77,8 +77,14 @@ export function protocolAltUrl(url: string): string {
 
 /** 站根（Referer 用；纯函数）：`https://a.b/c/d.json?x=1` → `https://a.b/` */
 export function siteRootOf(url: string): string {
-  const m = /^(https?:\/\/[^/]+)/i.exec(url.trim());
-  return m ? m[1] + '/' : '';
+  try {
+    const parsed = new URL(url.trim());
+    // HTTP headers cannot contain a Unicode hostname. URL normalizes IDNs to
+    // ASCII and also avoids putting credentials or a query into the Referer.
+    return /^https?:$/.test(parsed.protocol) ? parsed.origin + '/' : '';
+  } catch {
+    return '';
+  }
 }
 
 /**

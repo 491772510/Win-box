@@ -23,7 +23,21 @@ import java.util.Set;
  * 纯数据类，按 Android 语义实现 —— 蜘蛛常用它拆播放地址与查询参数，
  * 空壳或返回 null 会让下游取到错误结果。
  */
-public class Uri {
+/**
+ * ★ 2026-10-13（合并上游 1.21.2）：**协变覆盖生成的桥**。
+ *   `Uri.buildUpon()` 声明返回 `Builder`（`Builder extends Uri`），编译器会额外生成一个
+ *   描述符为 `()Landroid/net/Uri;` 的**桥方法** —— 于是加固壳里两种历史字节码
+ *   （Android 官方的 `()Landroid/net/Uri$Builder;` 和旧基线的 `()Landroid/net/Uri;`）
+ *   **都能解析到**，不会 NoSuchMethodError。
+ *   `buildUpon2()` 一并挂进来：它同样是非标准方法，调用方两种描述符都出现过。
+ */
+abstract class LegacyUriBuilderApi {
+    public abstract Uri buildUpon();
+
+    public abstract Uri buildUpon2();
+}
+
+public class Uri extends LegacyUriBuilderApi {
 
     private final String s;
 
@@ -186,11 +200,15 @@ public class Uri {
         return !isRelative();
     }
 
-    /** ★ 缺此方法会让 BiliYs 等源的 data() 抛 NoSuchMethodError（本次修复点） */
+    /**
+     * ★ 缺此方法会让 BiliYs 等源的 data() 抛 NoSuchMethodError（2026-10-12 修复点）
+     * ★ 2026-10-13（合并上游）：路径段里的 `+` 是**字面量**，不是空格 ——
+     *   只有 form query 才把 `+` 当空格。先转义再 decode，否则带 `+` 的文件名会变空格。
+     */
     public String getLastPathSegment() {
         List<String> segs = getPathSegments();
         if (segs.isEmpty()) return null;
-        return segs.get(segs.size() - 1);
+        return decode(segs.get(segs.size() - 1).replace("+", "%2B"));
     }
 
     public List<String> getPathSegments() {
@@ -272,16 +290,26 @@ public class Uri {
     // 构建
     // ------------------------------------------------------------------
 
-    public Uri buildUpon() {
-        return new Builder(s).build();
-    }
-
-    /** 非标准方法：基线里既有调用方，保留以免破坏（见类注释）。 */
-    public Uri.Builder buildUpon2() {
+    /**
+     * Android 语义：返回**可变的 Builder**（调用方 `.appendQueryParameter(k,v).build()` 链式修改）。
+     * 桥方法让返回 `Uri` 的旧字节码同样可用（见 `LegacyUriBuilderApi`）。
+     */
+    @Override
+    public Builder buildUpon() {
         return new Builder(s);
     }
 
-    public static final class Builder {
+    /** 非标准方法：基线里既有调用方，保留以免破坏（见类注释）。 */
+    @Override
+    public Builder buildUpon2() {
+        return new Builder(s);
+    }
+
+    /**
+     * ★ 2026-10-13（合并上游）：Builder **继承 Uri** —— ① 让 `buildUpon()` 的协变覆盖成立；
+     *   ② Builder 自身可当 Uri 用（壳里确有把 buildUpon 结果直接当 Uri 传的写法）。
+     */
+    public static class Builder extends Uri {
 
         private String base;
         private String scheme;
@@ -291,6 +319,7 @@ public class Uri {
         private String fragment;
 
         Builder(String base) {
+            super(base);
             this.base = base;
         }
 

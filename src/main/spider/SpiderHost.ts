@@ -8,7 +8,7 @@ import type { LocalPkgAccess } from '../store/LocalPkgStore';
 import { parsePkgUrl } from '../../engine/config/localPkg';
 import { getAdapter } from '../net/qr';
 import { runDriveWebLogin } from '../net/webLogin';
-import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid, extractEpisodeName, extractQuarkShare } from '../net/quarkTransfer';
+import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid, extractEpisodeName, extractQuarkShare, refreshQuarkCookieSession } from '../net/quarkTransfer';
 // ★ 2026-09-30：UC 分享取流（**免转存直链优先**，回退才转存；jar 侧那套 do=pan 路由桌面端没有）
 import { ucResolveShare, ucFileDelete, isUcSharePlay, extractUcShare } from '../net/ucTransfer';
 // ★ 2026-09-30：百度分享取流（**只能转存** —— 免转存的 share/list 子目录接口已被百度关停；
@@ -60,6 +60,7 @@ import { join, dirname } from 'node:path';
 import { directPlayUrlError } from '../../shared/playbackResult';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { JarSpiderBridge, normalizeJarUrl } from '../../engine/spider/JarSpiderBridge';
+import { mergeCloudDriveTokens } from '../../engine/spider/driveExt';
 import {
   removePizazzCookieFile,
   removeWexCookieFile,
@@ -316,6 +317,10 @@ export class SpiderHost {
   private searchCache = new SearchCache<SearchAllReport>();
   /** 预热节流时间戳（配置应用/启动只冷启动有限的常驻蜘蛛进程） */
   private lastPrewarmAt = 0;
+  /** 启动前先完成网盘 cookie 同步/刷新，避免 JVM 初始化读到旧会话。 */
+  private prewarmEnabled = false;
+  /** 配置恢复时记录的 jar；待启动会话刷新完成后再触发桥接器预热。 */
+  private pendingWarmupJar = '';
   /** ★ 2026-09-27：运行期学到的「该源需要网盘绑定」源 key 集合 + 其持久化（见 markDriveBindNeeded） */
   private driveBindKeys = new Set<string>();
   private driveBindStore!: JsonStore;
@@ -556,8 +561,12 @@ export class SpiderHost {
   }
 
   cfgDeleteSource(key: string): void {
+    this.cfgDeleteSources([key]);
+  }
+
+  cfgDeleteSources(keys: readonly string[]): void {
     const before = this.manager.snapshot();
-    this.manager.deleteSource(key);
+    this.manager.deleteSources(keys);
     this.cleanupLocalImports(before);
   }
 
@@ -681,6 +690,41 @@ export class SpiderHost {
 
   // ---- 网盘/资源站凭据（绑定后供对应 csp_ 源调用） ----
   driveList() { return this.drives.list(); }
+  /** 允许启动阶段延迟的蜘蛛预热继续执行。 */
+  enablePrewarm(): void {
+    this.prewarmEnabled = true;
+    const jar = this.pendingWarmupJar;
+    this.pendingWarmupJar = '';
+    if (jar) this.bridge.warmup(jar).catch(() => undefined);
+  }
+  /**
+   * Refresh provider sessions before the JVM pool is prewarmed.
+   *
+   * Quark's web session can keep `__pus` valid while omitting the newer
+   * `__puus` until the member endpoint is visited.  The Pizazz/fty spiders
+   * read their cookie once during init, so doing this after prewarm leaves a
+   * permanently stale JVM until the next reset.  Only cookie names/lengths are
+   * logged; values never enter diagnostics.
+   */
+  async refreshDriveSessions(): Promise<void> {
+    const tokens = this.drives.list();
+    const quark = tokens.quark || '';
+    if (!quark) return;
+    const r = await refreshQuarkCookieSession(quark);
+    const names = r.cookie
+      .split(';')
+      .map((part) => part.slice(0, part.indexOf('=')).trim())
+      .filter(Boolean);
+    this.logger.i(
+      `网盘会话刷新 quark status=${r.status} changed=${r.changed} ` +
+      `cookieLen=${r.cookie.length} setCookieKeys=${r.setCookieKeys.join(',') || '-'} ` +
+      `keys=${[...new Set(names)].join(',')}`,
+    );
+    if (!r.changed) return;
+    this.drives.set('quark', r.cookie);
+    this.syncDriveFiles();
+    this.resetSpidersAfterDriveChange();
+  }
   /**
    * ★ 2026-09-26：本地代理 `/proxy/<jvmPort>` 被访问 → 把该蜘蛛 JVM 钉住（播放期间不回收）。
    *   壳/蜘蛛的 `<entry>?do=proxy&key=…` 播放地址靠它取流，JVM 一被回收就断流。
@@ -695,6 +739,9 @@ export class SpiderHost {
   }
   driveRemove(provider: string) {
     this.drives.remove(provider);
+    // Full synchronization removes the provider from every backing file,
+    // including Cloud-drive.json and the two jar cookie-file families.
+    this.syncDriveFiles();
     // ★ 解绑 → 清掉各系 cookie 文件（jar 侧「文件存在且非空」即视为已配置，必须一并清）
     removePizazzCookieFile(provider);
     const sandbox = spiderSandboxDir(spiderCacheDir());
@@ -1312,28 +1359,27 @@ export class SpiderHost {
    *   调用点：绑定（driveSet / 网页登录）、解绑（删文件）、还原设置、启动（%TEMP%/沙箱可能被系统清理）。 */
   syncDriveFiles(): void {
     const tokens = this.drives.list();
-    for (const [p, v] of Object.entries(tokens)) this.syncCloudDriveConfig(p, v);
+    this.syncCloudDriveConfig(tokens);
     const written = syncPizazzCookieFiles(tokens);
     if (written.length) this.logger.i(`已同步 Pizazz 系网盘 cookie 文件：${written.join(', ')}`);
     const sandbox = spiderSandboxDir(spiderCacheDir());
     const wexWritten = syncWexCookieFiles(tokens, sandbox);
-    if (wexWritten.length) this.logger.i(`已同步 wex 系网盘 cookie 文件：${wexWritten.join(', ')}`);
+    if (wexWritten.length) {
+      // 记录路径和长度，不记录 Cookie 内容；这能区分「已登录」与「Jar 实际读到的沙箱」。
+      const ucPath = wexWritten.find((p) => p.endsWith('.ucpancookie'));
+      const ucLen = ucPath ? readFileSync(ucPath, 'utf-8').trim().length : 0;
+      this.logger.i(`已同步 wex 系网盘 cookie 文件：${wexWritten.join(', ')}（sandbox=${sandbox}, ucLen=${ucLen}）`);
+    } else if (tokens.uc) {
+      this.logger.w(`wex UC cookie 未写入（sandbox=${sandbox}, ucLen=${tokens.uc.trim().length}）`);
+    }
     // ★ 2026-10-13：AiWex 系（新光影 / AiPan1Me / 玩偶 / 木偶 …）读的是 SharedPreferences
     //   `Wex_*_cookie`，只有这里同步了，扫码绑定的夸克/UC/百度才会被那一族源认账。
     const prefKeys = syncWexHostPrefs(tokens, sandbox);
     if (prefKeys.length) this.logger.i(`已同步 AiWex 系网盘凭据（SharedPreferences 默认值）：${prefKeys.join(', ')}`);
   }
 
-  // fty 系网盘 jar 从 Cloud-drive 配置文件读的键名（Cloud_quark→quarkCookie / Cloud_uc→ucCookie）
-  private static readonly CLOUD_DRIVE_KEYS: Record<string, string> = {
-    quark: 'quarkCookie',
-    uc: 'ucCookie',
-  };
-
   /** 把网盘凭据同步写入 fty 的 Cloud-drive 配置文件（jar 源从该文件读 quarkCookie/ucCookie 等） */
-  private syncCloudDriveConfig(provider: string, value: string): void {
-    const key = SpiderHost.CLOUD_DRIVE_KEYS[provider.trim().toLowerCase()];
-    if (!key) return;
+  private syncCloudDriveConfig(tokens: Record<string, string>): void {
     const path = this.cloudDriveFilePath();
     let obj: Record<string, unknown> = {};
     try {
@@ -1342,11 +1388,11 @@ export class SpiderHost {
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) obj = parsed as Record<string, unknown>;
       }
     } catch { /* 首次/损坏 → 重建 */ }
-    obj[key] = value;
+    obj = mergeCloudDriveTokens(obj, tokens);
     try {
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, JSON.stringify(obj), 'utf-8');
-      this.logger.i(`已写入 Cloud-drive 配置 ${key} -> ${path}`);
+      this.logger.i(`已同步 Cloud-drive 配置 -> ${path}`);
     } catch (e) {
       this.logger.w(`写入 Cloud-drive 配置失败: ${(e as Error).message}`);
     }
@@ -1359,7 +1405,17 @@ export class SpiderHost {
         const ext = JSON.parse(String(s.ext || '{}')) as Record<string, unknown>;
         const cd = ext['Cloud-drive'];
         if (typeof cd === 'string' && cd.trim()) {
-          const rel = cd.trim().replace(/^\.\//, '');
+          // Spider ext is enriched to a local proxy URL before the JVM sees
+          // it, but config storage can already contain that enriched form
+          // after an import. Strip the proxy route before resolving locally.
+          let rel = cd.trim().replace(/^\.\//, '');
+          try {
+            const parsed = new URL(rel);
+            if (parsed.pathname.startsWith('/file/')) rel = decodeURIComponent(parsed.pathname.slice('/file/'.length));
+          } catch {
+            /* Relative Cloud-drive paths are the normal configuration form. */
+          }
+          rel = rel.replace(/^\/+/, '');
           return join(userDataDir(), rel);
         }
       } catch { /* ext 非 JSON，跳过 */ }
@@ -2521,6 +2577,12 @@ export class SpiderHost {
             return this.playInner(key, flag, id, true);
           }
           if (bound) {
+            if (prov === 'uc' && /\[uc\]\(auth\)/i.test(String(r.message))) {
+              // Preserve the spider's authentication diagnostic. It proves
+              // the retry reached the UC auth path, so translating it into a
+              // generic invalid-share message would hide the real failure.
+              return r;
+            }
             // ★ 2026-10-09（用户报「还未登录夸克账号」类文案定位需要）：日志落**原文全文**（上屏仍截 100 字）
             //   —— 不同 jar 家族的「未登录」文案措辞不同（如 fty「接口列表配置中心」/ wex「还没有配置夸克
             //   Cookie」/ 未知族「【配置中心】」），全文是判定 jar 家族与读取通道的第一手证据。
@@ -2817,7 +2879,10 @@ export class SpiderHost {
     if (normalized === this.lastSpiderJar) return;
     this.lastSpiderJar = normalized;
     this.bridge.setDefaultJar(normalized);
-    if (normalized) this.bridge.warmup(normalized).catch(() => undefined);
+    if (normalized) {
+      if (this.prewarmEnabled) this.bridge.warmup(normalized).catch(() => undefined);
+      else this.pendingWarmupJar = normalized;
+    }
   }
 
   /** 用户配置每次变更（含启动恢复/导入替换/增删改排序/选中源）后同步内存态 */
@@ -2864,10 +2929,15 @@ export class SpiderHost {
     // ★ 预热常驻蜘蛛进程（延后 1s：只要不抢窗口首帧即可，越早预热用户越早受益）。
     //   深度预热（__warm__：加载类 + 预建实例）覆盖前 3 个不同 key。
     //   ★ 2026-09-24 起同时调度 .py 源预热（脚本 + 嵌入式 Python 运行时）——见 prewarmPythonSources。
-    setTimeout(() => {
+    const schedule = () => {
+      if (!this.prewarmEnabled) {
+        setTimeout(schedule, 250).unref?.();
+        return;
+      }
       try { this.prewarmSpiders(3, 1); } catch { /* 预热失败静默 */ }
       try { this.prewarmPythonSources(); } catch { /* 预热失败静默 */ }
-    }, 1000).unref?.();
+    };
+    setTimeout(schedule, 1000).unref?.();
   }
 }
 

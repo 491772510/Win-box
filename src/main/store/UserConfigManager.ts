@@ -423,12 +423,18 @@ export class UserConfigManager {
 
   /** 删除源；若删除的是当前选中源则顺带清空 activeSourceKey。 */
   deleteSource(key: string): void {
-    if (!this.snap.sources.some((s) => s.key === key)) return;
+    this.deleteSources([key]);
+  }
+
+  /** 批量删除源：一次持久化/一次内容变更，避免逐个删除造成 UI 与档案反复刷新。 */
+  deleteSources(keys: readonly string[]): void {
+    const removing = new Set(keys.filter(Boolean));
+    if (!removing.size || !this.snap.sources.some((s) => removing.has(s.key))) return;
     const next: UserConfig = {
       ...this.snap,
-      sources: this.snap.sources.filter((s) => s.key !== key),
+      sources: this.snap.sources.filter((s) => !removing.has(s.key)),
     };
-    if (next.ui.activeSourceKey === key) next.ui.activeSourceKey = '';
+    if (removing.has(next.ui.activeSourceKey)) next.ui = { ...next.ui, activeSourceKey: '' };
     this.apply(next);
   }
 

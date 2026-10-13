@@ -1,6 +1,6 @@
 // tests/ucTransfer.spec.ts — UC 解链的纯函数（★ 2026-09-30 新增）
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { isUcSharePlay, extractUcShare, ucResolveShare } from '../src/main/net/ucTransfer';
+import { isUcSharePlay, extractUcShare, ucResolveShare, validateUcMediaUrl } from '../src/main/net/ucTransfer';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -73,6 +73,12 @@ describe('UC 精确选集取链（不触网）', () => {
     const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));
       const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (url.hostname === 'media.test') {
+        return new Response(new Uint8Array([0x1a]), {
+          status: 206,
+          headers: { 'content-type': 'video/x-matroska', 'content-range': 'bytes 0-0/1024', 'content-length': '1' },
+        });
+      }
       if (url.pathname.endsWith('/share/sharepage/token')) {
         return new Response(JSON.stringify({ code: 0, data: { stoken: 'share-session' } }));
       }
@@ -125,6 +131,12 @@ describe('UC 精确选集取链（不触网）', () => {
           headers: [['set-cookie', '__puus=refreshed; Path=/'], ['set-cookie', 'session=new; Path=/']],
         });
       }
+      if (url.hostname === 'media.test') {
+        return new Response(new Uint8Array([0x1a]), {
+          status: 206,
+          headers: { 'content-type': 'video/x-matroska', 'content-range': 'bytes 0-0/1024', 'content-length': '1' },
+        });
+      }
       throw new Error(`Unexpected request ${url.pathname} ${JSON.stringify(body)}`);
     });
     vi.stubGlobal('fetch', fetch);
@@ -152,6 +164,12 @@ describe('UC 精确选集取链（不触网）', () => {
       if (url.pathname.endsWith('/task')) return reply({ code: 0, data: { status: 2, save_as: { save_as_top_fids: ['own-file-2'] } } });
       if (url.pathname.endsWith('/file/download')) return reply(body.pwd_id
         ? { code: 403 } : { code: 0, data: [{ download_url: `https://media.test/${body.fids[0]}` }] });
+      if (url.hostname === 'media.test') {
+        return new Response(new Uint8Array([0x1a]), {
+          status: 206,
+          headers: { 'content-type': 'video/x-matroska', 'content-range': 'bytes 0-0/1024', 'content-length': '1' },
+        });
+      }
       throw new Error(`Unexpected ${url.pathname}`);
     });
     vi.stubGlobal('fetch', fetch);
@@ -175,6 +193,26 @@ describe('UC 精确选集取链（不触网）', () => {
     vi.stubGlobal('fetch', fetch);
     await expect(ucResolveShare('share', '', 'cookie', { innerFid: 'file-2' })).rejects.toThrow('UC 分享列表失败 HTTP 403');
     expect(fetch.mock.calls).toHaveLength(2);
+  });
+});
+
+describe('validateUcMediaUrl', () => {
+  it('拒绝 CDN 返回的短错误对象或错误总大小', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('short-error', {
+      status: 206,
+      headers: { 'content-type': 'application/json', 'content-range': 'bytes 0-0/15' },
+    })));
+    const r = await validateUcMediaUrl('https://media.test/wrong', 1024, { Cookie: 'uc=1' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('非媒体');
+  });
+
+  it('接受目标大小匹配且带媒体类型的 Range 响应', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new Uint8Array([0x1a]), {
+      status: 206,
+      headers: { 'content-type': 'video/x-matroska', 'content-range': 'bytes 0-0/1024' },
+    })));
+    await expect(validateUcMediaUrl('https://media.test/episode', 1024)).resolves.toEqual({ ok: true });
   });
 });
 

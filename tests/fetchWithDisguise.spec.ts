@@ -77,6 +77,10 @@ describe('URL 工具（纯函数）', () => {
 
   it('siteRootOf：取站根做 Referer', () => {
     expect(siteRootOf('https://a.b/c/d.json?x=1')).toBe('https://a.b/');
+    expect(siteRootOf('http://hb.小虎斑.site:25252/仅供测试')).toBe(new URL('http://hb.小虎斑.site:25252/').origin + '/');
+    expect(siteRootOf('http://肥猫.net/tv')).toMatch(/^http:\/\/xn--[a-z0-9-]+\.net\/$/);
+    expect(siteRootOf('https://user:password@a.b?x=1')).toBe('https://a.b/');
+    expect(siteRootOf('ftp://a.b/path')).toBe('');
     expect(siteRootOf('nope')).toBe('');
   });
 

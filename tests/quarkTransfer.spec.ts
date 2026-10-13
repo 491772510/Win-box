@@ -1,8 +1,63 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { resolveShareFile, extractEpisodeFid, extractEpisodeName, episodeKeyOf, matchTransferredFile, isQuarkSharePlay, extractQuarkShare, isDirNode, isRealFileNode, quarkPlayUrl, quarkTransfer, QUARK_CACHE_DIR_NAME, SESSION_DIR_PREFIX, sessionDirName } from '../src/main/net/quarkTransfer';
+import { resolveShareFile, extractEpisodeFid, extractEpisodeName, episodeKeyOf, matchTransferredFile, isQuarkSharePlay, extractQuarkShare, isDirNode, isRealFileNode, quarkPlayUrl, quarkTransfer, quarkFileDelete, refreshQuarkCookieSession, QUARK_CACHE_DIR_NAME, SESSION_DIR_PREFIX, sessionDirName } from '../src/main/net/quarkTransfer';
 import type { ShareListFetcher } from '../src/main/net/quarkTransfer';
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe('refreshQuarkCookieSession', () => {
+  it('合并 member 响应的新 __puus，但不把 cookie 值写入诊断结果', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: {
+        getSetCookie: () => ['__puus=NEW; Path=/; HttpOnly'],
+        get: () => null,
+      },
+      text: async () => JSON.stringify({ code: 0 }),
+    });
+    const r = await refreshQuarkCookieSession('__pus=PUS', fetcher);
+    expect(r).toEqual({
+      cookie: '__pus=PUS; __puus=NEW',
+      changed: true,
+      status: 200,
+      setCookieKeys: ['__puus'],
+    });
+    expect(fetcher).toHaveBeenCalledWith(expect.stringContaining('/1/clouddrive/member?'), expect.objectContaining({
+      method: 'GET',
+      headers: expect.objectContaining({ Cookie: '__pus=PUS' }),
+    }));
+  });
+
+  it('member 接口失败时保留原 cookie，不误写入半成品', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      status: 401,
+      headers: { getSetCookie: () => ['__puus=IGNORED'], get: () => null },
+      text: async () => JSON.stringify({ code: 401 }),
+    });
+    await expect(refreshQuarkCookieSession('__pus=PUS', fetcher)).resolves.toMatchObject({
+      cookie: '__pus=PUS', changed: false, status: 401, setCookieKeys: ['__puus'],
+    });
+  });
+});
+
+describe('quarkFileDelete 幂等清理', () => {
+  it('明确已删除的 fid 可清队列，不重复删除其它文件', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ code: 23004, message: '[文件已经删除,请稍后重试]' }), { status: 400 }));
+    vi.stubGlobal('fetch', fetch);
+    expect(await quarkFileDelete('test-cookie', 'test-dir', 'exact-fid')).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetch.mock.calls[0][1].body).filelist).toEqual(['exact-fid']);
+  });
+
+  it.each([
+    [401, 23004, '[文件已经删除,请稍后重试]'],
+    [400, 23004, '权限不足'],
+    [400, 23003, '[文件已经删除,请稍后重试]'],
+    [429, 23004, '[文件已经删除,请稍后重试]'],
+  ])('HTTP %s / code %s 的其它失败保留重试', async (status, code, message) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ code, message }), { status })));
+    expect(await quarkFileDelete('test-cookie', 'test-dir', 'exact-fid')).toBe(false);
+  });
+});
 
 describe('网盘所选文件描述兼容', () => {
   it('保留 fileId 与百度 fs_id，数字按字符串提取不丢精度', () => {

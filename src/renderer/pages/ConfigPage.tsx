@@ -70,6 +70,13 @@ export default function ConfigPage() {
   const [url, setUrl] = useState('');
   /** ★ 2026-09-27（用户要求）：导入时可自填订阅名；留空 → 主进程按「新订阅 xx」/ 本地文件名自动命名 */
   const [subName, setSubName] = useState('');
+  /** 纯 Python 本地包的生成订阅需要单独确认文件名；不能使用浏览器 prompt（Electron 页面不保证提供它）。 */
+  const [packageNamePrompt, setPackageNamePrompt] = useState<{ root: string; name: string } | null>(null);
+  const packageNameDialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = packageNameDialogRef.current;
+    if (packageNamePrompt && dialog && !dialog.open) dialog.showModal();
+  }, [packageNamePrompt]);
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<ImportReport | null>(null);
   const [cfg, setCfg] = useState<UserConfig | null>(null);
@@ -341,6 +348,10 @@ export default function ConfigPage() {
   // 编辑态
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [sourcePick, setSourcePick] = useState<Set<string>>(new Set());
+  const [sourceDeleteBusy, setSourceDeleteBusy] = useState(false);
+  const sourceProfileRef = useRef<string | null>(null);
+  const selectAllSourcesRef = useRef<HTMLInputElement>(null);
 
   // 档案改名（内联编辑）
   const [renameId, setRenameId] = useState<string | null>(null);
@@ -368,6 +379,9 @@ export default function ConfigPage() {
 
   const refresh = useCallback(async () => {
     const c = await client.cfgGet();
+    const profileChanged = sourceProfileRef.current !== c.activeProfileId;
+    sourceProfileRef.current = c.activeProfileId;
+    setSourcePick((previous) => profileChanged ? new Set() : new Set([...previous].filter(key => c.sources.some(s => s.key === key))));
     setCfg(c);
     window.dispatchEvent(new Event(SOURCES_CHANGED));
   }, []);
@@ -450,6 +464,11 @@ export default function ConfigPage() {
     setLastOk('');
     try {
       const r = await client.cfgImportPackage(subName.trim() || undefined);
+      if (r.needsName && r.root) {
+        const suggested = subName.trim() || r.root.split(/[\\/]/).filter(Boolean).pop() || 'Python源';
+        setPackageNamePrompt({ root: r.root, name: suggested });
+        return;
+      }
       if (r.ok) {
         if (r.result) applyImportResult(r.result);
         setLastOk(
@@ -460,6 +479,33 @@ export default function ConfigPage() {
         await refresh();
       } else if (r.error) setErr(r.error);
       // r.ok=false 且无 error = 用户取消目录选择，静默
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmPackageName() {
+    const prompt = packageNamePrompt;
+    const name = prompt?.name.trim();
+    if (!prompt || !name || busy) return;
+    setBusy(true);
+    setErr('');
+    try {
+      const r = await client.cfgImportPackage(name, prompt.root);
+      if (r.ok) {
+        if (r.result) applyImportResult(r.result);
+        setLastOk(
+          `已导入本地包：${r.name || ''}（订阅 ${r.rel || ''}，${r.sites ?? 0} 个源）` +
+            (r.warnings && r.warnings.length ? `｜提示：${r.warnings.join('；')}` : ''),
+        );
+        setSubName('');
+        setPackageNamePrompt(null);
+        await refresh();
+      } else if (r.error) {
+        setErr(r.error);
+      }
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -501,6 +547,8 @@ export default function ConfigPage() {
   }
 
   async function delSource(key: string) {
+    if (sourceDeleteBusy) return;
+    setSourceDeleteBusy(true);
     setErr('');
     try {
       await client.cfgDeleteSource(key);
@@ -508,7 +556,36 @@ export default function ConfigPage() {
       await refresh();
     } catch (e) {
       setErr((e as Error).message);
+    } finally {
+      setSourceDeleteBusy(false);
     }
+  }
+
+  async function deleteSelectedSources() {
+    const selected = sources.filter(s => sourcePick.has(s.key));
+    if (!selected.length || sourceDeleteBusy) return;
+    if (!window.confirm(`确定删除选中的 ${selected.length} 个源吗？\n${selected.slice(0, 6).map(s => s.name || s.key).join('、')}${selected.length > 6 ? '…' : ''}\n原始文件不会被修改；不再被其它档案引用的导入脚本副本将被清理。`)) return;
+    setSourceDeleteBusy(true);
+    setErr('');
+    try {
+      await client.cfgDeleteSources(selected.map(s => s.key));
+      if (editingKey && sourcePick.has(editingKey)) { setEditingKey(null); setDraft(null); }
+      setSourcePick(new Set());
+      setLastOk(`已删除 ${selected.length} 个源`);
+      await refresh();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSourceDeleteBusy(false);
+    }
+  }
+
+  function toggleSourcePick(key: string) {
+    setSourcePick(previous => {
+      const next = new Set(previous);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
   }
 
   async function moveSource(key: string, dir: 'up' | 'down' | 'top' | 'bottom') {
@@ -560,6 +637,8 @@ export default function ConfigPage() {
 
   const sources = cfg?.sources ?? [];
   const activeKey = cfg?.ui.activeSourceKey ?? '';
+  const selectedSourceCount = sources.filter(s => sourcePick.has(s.key)).length;
+  const allSourcesSelected = sources.length > 0 && selectedSourceCount === sources.length;
 
   async function saveProfile() {
     setErr('');
@@ -822,6 +901,12 @@ export default function ConfigPage() {
     try { localStorage.setItem(CFG_TAB_KEY, t); } catch { /* ignore */ }
   };
 
+  useEffect(() => {
+    if (selectAllSourcesRef.current) {
+      selectAllSourcesRef.current.indeterminate = selectedSourceCount > 0 && !allSourcesSelected;
+    }
+  }, [tab, selectedSourceCount, allSourcesSelected]);
+
   // ★ 2026-09-29：切到「存储」tab 时拉取 WebDAV 服务器列表（放在 tab 声明之后，避免 TDZ）
   useEffect(() => {
     if (tab === 'storage') void loadDav();
@@ -894,7 +979,7 @@ export default function ConfigPage() {
             导入本地 .py 文件
           </button>
           {/* ★ 2026-09-29（用户要求）：本地包（影视.json + py/js/jar/html/xbpq 目录） */}
-          <button disabled={busy} onClick={doImportPackage}>
+          <button disabled={busy} onClick={doImportPackage} title="可选择仅含 .py 文件的文件夹，自动在应用副本中生成订阅 JSON">
             导入本地包
           </button>
           {/* ★ 2026-09-30（用户要求）：本地 TXT / M3U 直播源（导入后直播页线路下拉可见） */}
@@ -918,13 +1003,26 @@ export default function ConfigPage() {
           我的源列表（{sources.length}）
         </summary>
         <div style={{ marginTop: 10 }}>
+        {sources.length > 0 && (
+          <div className="row" style={{ marginBottom: 10 }}>
+            <span className="muted">已选 {selectedSourceCount} / {sources.length} 个源</span>
+            <button disabled={sourceDeleteBusy || !selectedSourceCount} onClick={() => setSourcePick(new Set())}>清空选择</button>
+            <button disabled={busy || sourceDeleteBusy || !selectedSourceCount} onClick={() => void deleteSelectedSources()} style={{ color: 'var(--danger)' }}>
+              {sourceDeleteBusy ? '删除中…' : `删除所选（${selectedSourceCount}）`}
+            </button>
+          </div>
+        )}
         {sources.length === 0 ? (
           <div className="empty" style={{ padding: 24 }}>尚无源，请先导入订阅</div>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
               <tr style={{ color: 'var(--text-dim)', textAlign: 'left' }}>
-                <th style={{ padding: 6, borderBottom: '1px solid var(--border)', width: 30 }}>选中</th>
+                <th style={{ padding: 6, borderBottom: '1px solid var(--border)', width: 36, textAlign: 'center' }}>
+                  <input ref={selectAllSourcesRef} type="checkbox" aria-label="全选源" title="全选 / 取消全选" checked={allSourcesSelected} disabled={sourceDeleteBusy}
+                    onChange={e => setSourcePick(e.target.checked ? new Set(sources.map(s => s.key)) : new Set())} />
+                </th>
+                <th style={{ padding: 6, borderBottom: '1px solid var(--border)', width: 36 }}>当前</th>
                 <th style={{ padding: 6, borderBottom: '1px solid var(--border)' }}>key / name</th>
                 <th style={{ padding: 6, borderBottom: '1px solid var(--border)' }}>形态</th>
                 <th style={{ padding: 6, borderBottom: '1px solid var(--border)' }}>状态</th>
@@ -947,6 +1045,9 @@ export default function ConfigPage() {
                       outline: isActive && !isEditing ? '1px solid var(--accent)' : undefined,
                     }}
                   >
+                    <td style={{ padding: 6, borderBottom: '1px solid var(--border)', textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                      <input type="checkbox" aria-label={`选择源 ${s.name || s.key}`} checked={sourcePick.has(s.key)} disabled={sourceDeleteBusy} onChange={() => toggleSourcePick(s.key)} />
+                    </td>
                     <td style={{ padding: 6, borderBottom: '1px solid var(--border)', textAlign: 'center', color: 'var(--accent)' }}>
                       {isActive ? '●' : '○'}
                     </td>
@@ -1087,7 +1188,7 @@ export default function ConfigPage() {
                           <div className="row" style={{ flexWrap: 'nowrap' }} onClick={(e) => e.stopPropagation()}>
                             <button onClick={() => startEdit(s)}>编辑</button>
                             <button onClick={() => void runDiagnose(s.key)}>诊断</button>
-                            <button onClick={() => delSource(s.key)} style={{ color: 'var(--danger)' }}>删除</button>
+                            <button disabled={sourceDeleteBusy} onClick={() => delSource(s.key)} style={{ color: 'var(--danger)' }}>删除</button>
                             <button onClick={() => moveSource(s.key, 'up')} title="上移">↑</button>
                             <button onClick={() => moveSource(s.key, 'down')} title="下移">↓</button>
                             <button onClick={() => moveSource(s.key, 'top')} title="置顶">⤒</button>
@@ -1912,6 +2013,51 @@ export default function ConfigPage() {
         </div>
       </div>
       </>
+      )}
+
+      {packageNamePrompt && (
+        <dialog
+          ref={packageNameDialogRef}
+          aria-modal="true"
+          aria-labelledby="local-package-name-title"
+          onCancel={(e) => {
+            e.preventDefault();
+            if (!busy) setPackageNamePrompt(null);
+          }}
+          style={{
+            width: 'min(460px, calc(100% - 40px))', padding: 0,
+            border: '1px solid var(--border)', borderRadius: 12,
+            background: 'var(--bg-elev2)', color: 'var(--text)',
+            boxShadow: '0 12px 40px rgba(0,0,0,.35)',
+          }}
+        >
+          <div
+            className="card"
+            style={{ padding: 18, margin: 0 }}
+          >
+            <div id="local-package-name-title" style={{ fontWeight: 600, marginBottom: 8 }}>命名本地 Python 包</div>
+            <div className="muted" style={{ fontSize: 12, lineHeight: 1.6, marginBottom: 12 }}>
+              此文件夹只包含 Python 源文件，应用会在托管副本中自动生成订阅 JSON。请输入文件名；原始文件夹不会被修改。
+            </div>
+            <input
+              autoFocus
+              value={packageNamePrompt.name}
+              disabled={busy}
+              aria-label="生成的 JSON 文件名"
+              placeholder="例如：我的 Python 源"
+              onChange={(e) => { setErr(''); setPackageNamePrompt({ ...packageNamePrompt, name: e.target.value }); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') void confirmPackageName(); }}
+              style={{ width: '100%', boxSizing: 'border-box', marginBottom: 14 }}
+            />
+            {err && <div role="alert" className="err" style={{ marginBottom: 12 }}>{err}</div>}
+            <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+              <button disabled={busy} onClick={() => setPackageNamePrompt(null)}>取消</button>
+              <button className="primary" disabled={busy || !packageNamePrompt.name.trim()} onClick={() => void confirmPackageName()}>
+                {busy ? '导入中…' : '确认导入'}
+              </button>
+            </div>
+          </div>
+        </dialog>
       )}
     </div>
   );

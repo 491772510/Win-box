@@ -71,6 +71,7 @@ export const IPC = {
   CFG_ADD_SOURCE: 'cfg:addSource',
   CFG_UPDATE_SOURCE: 'cfg:updateSource',
   CFG_DELETE_SOURCE: 'cfg:deleteSource',
+  CFG_DELETE_SOURCES: 'cfg:deleteSources',
   CFG_MOVE_SOURCE: 'cfg:moveSource',
   CFG_SET_ACTIVE_SOURCE: 'cfg:setActiveSource',
   CFG_SET_ACTIVE_LIVE: 'cfg:setActiveLive',

@@ -3,7 +3,7 @@
 // 不依赖 electron（SpiderHost 主进程装配不可在 vitest 实例化，用同构的 host 闭包替代，
 // 与 SpiderHost.ts:64/91 的 driveTokens: () => this.drives.list() 完全一致）。
 import { describe, it, expect, vi } from 'vitest';
-import { mergeDriveTokens, normalizeDriveTokens, ALI_KEY, normalizeCloudDrive, enrichExt } from '../src/engine/spider/driveExt';
+import { mergeCloudDriveTokens, mergeDriveTokens, normalizeDriveTokens, ALI_KEY, normalizeCloudDrive, enrichExt } from '../src/engine/spider/driveExt';
 import { JarSpider } from '../src/engine/spider/JarSpider';
 import { DriveStore } from '../src/main/store/DriveStore';
 import type { JsonStore } from '../src/main/store/JsonStore';
@@ -109,6 +109,29 @@ describe('mergeDriveTokens — 别名注入（生态惯例，不覆盖源作者�
     expect(mergeDriveTokens('https://raw-url', { ali: 'T' })).toBe('https://raw-url');
     expect(mergeDriveTokens('{"a":1}', undefined)).toBe('{"a":1}');
     expect(mergeDriveTokens('{"a":1}', { ali: '' })).toBe('{"a":1}');
+  });
+  it('解绑时清除宿主上一轮注入的 provider 与 alias，但保留源作者 token', () => {
+    const injected = mergeDriveTokens('{"siteUrl":"https://x"}', { ali: 'OLD' });
+    const cleared = JSON.parse(mergeDriveTokens(injected, {})) as Record<string, string>;
+    expect(cleared.ali).toBeUndefined();
+    expect(cleared.token).toBeUndefined();
+    expect(cleared.siteUrl).toBe('https://x');
+
+    const author = JSON.parse(mergeDriveTokens('{"token":"AUTHOR"}', {})) as Record<string, string>;
+    expect(author.token).toBe('AUTHOR');
+  });
+});
+
+describe('mergeCloudDriveTokens — 当前绑定快照覆盖并清理旧凭据', () => {
+  it('多 provider 同步覆盖旧值，解绑后移除对应 cookie 键', () => {
+    expect(mergeCloudDriveTokens(
+      { quarkCookie: 'OLD-Q', ucCookie: 'OLD-U', custom: 'keep' },
+      { quark: 'NEW-Q', uc: 'NEW-U' },
+    )).toEqual({ quarkCookie: 'NEW-Q', ucCookie: 'NEW-U', custom: 'keep' });
+    expect(mergeCloudDriveTokens(
+      { quarkCookie: 'OLD-Q', ucCookie: 'OLD-U', custom: 'keep' },
+      { uc: 'NEW-U' },
+    )).toEqual({ ucCookie: 'NEW-U', custom: 'keep' });
   });
 });
 

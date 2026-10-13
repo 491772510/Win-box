@@ -38,8 +38,13 @@ export class DriveStore {
     const raw = this.store.getObject<DriveTokens | null>(DRIVE_KEY, null);
     if (raw && typeof raw === 'object') {
       this.data = {};
-      for (const [k, v] of Object.entries(raw)) {
-        if (typeof v === 'string') this.data[k] = v;
+      for (const [rawKey, v] of Object.entries(raw)) {
+        if (typeof v !== 'string') continue;
+        const k = this.canonicalProvider(rawKey);
+        // `ali` is the current key. If both legacy `alipan` and current `ali`
+        // exist, the current key wins regardless of object insertion order.
+        if (k === 'ali' && rawKey.trim().toLowerCase() === 'alipan' && this.data.ali !== undefined) continue;
+        this.data[k] = v;
       }
     }
   }
@@ -56,16 +61,16 @@ export class DriveStore {
         }
         continue;
       }
-      out[k] = p;
+      if (p.trim()) out[k] = p;
     }
     this.decoded = out;
     return { ...out };
   }
   has(provider: string): boolean {
-    return this.decodeValue(this.data[provider.trim().toLowerCase()]) != null;
+    return !!this.list()[this.canonicalProvider(provider)]?.trim();
   }
   set(provider: string, token: string): void {
-    const k = provider.trim().toLowerCase();
+    const k = this.canonicalProvider(provider);
     if (!k) throw new Error('provider 不能为空');
     if (!token.trim()) throw new Error('token 不能为空');
     const plain = token.trim();
@@ -73,13 +78,17 @@ export class DriveStore {
     this.persist();
   }
   remove(provider: string): void {
-    delete this.data[provider.trim().toLowerCase()];
+    delete this.data[this.canonicalProvider(provider)];
     this.persist();
   }
   private decodeValue(v: string | undefined): string | null {
     if (v == null) return null;
     if (!this.codec) return v; // 无 codec → 视为明文
     return this.codec.decode(v);
+  }
+  private canonicalProvider(provider: string): string {
+    const k = provider.trim().toLowerCase();
+    return k === 'alipan' ? 'ali' : k;
   }
   private persist(): void {
     this.decoded = null; // 数据变了 → 解码缓存失效（下次 list() 重新解码）

@@ -20,6 +20,7 @@ const api = {
     addSource: (bean: SourceBean) => invoke<SourceBean>(IPC.CFG_ADD_SOURCE, bean),
     updateSource: (key: string, patch: SourceUpdatePatch) => invoke<SourceBean>(IPC.CFG_UPDATE_SOURCE, { key, patch }),
     deleteSource: (key: string) => invoke<void>(IPC.CFG_DELETE_SOURCE, key),
+    deleteSources: (keys: string[]) => invoke<void>(IPC.CFG_DELETE_SOURCES, keys),
     moveSource: (key: string, direction: SourceMoveDirection) => invoke<void>(IPC.CFG_MOVE_SOURCE, { key, direction }),
     setActiveSource: (key: string) => invoke<void>(IPC.CFG_SET_ACTIVE_SOURCE, key),
     setActiveLive: (index: number) => invoke<void>(IPC.CFG_SET_ACTIVE_LIVE, index),
@@ -44,17 +45,18 @@ const api = {
      * ★ 2026-09-29（用户要求）：导入**本地包**（含 影视.json 与 py/js/jar/html 等子目录的目录包）。
      * 选目录 → 登记包根 → 包内相对引用展开 → 走正常订阅导入（档案 apiUrl 记 pkg://<i>/<rel>）。
      */
-    importPackage: (name?: string) =>
+    importPackage: (args?: { name?: string; root?: string }) =>
       invoke<{
         ok: boolean;
         root?: string;
         rel?: string;
         sites?: number;
         name?: string;
+        needsName?: boolean;
         error?: string;
         warnings?: string[];
         result?: { config: SiteConfig; report: ImportReport; warnings: string[]; urls?: { name: string; url: string }[] };
-      }>(IPC.CFG_IMPORT_PACKAGE, name),
+      }>(IPC.CFG_IMPORT_PACKAGE, args),
     /** ★ 2026-09-29 本地包「网页源」：在独立窗口打开 homePage html（fm 桥注入 window.fm） */
     webHomeOpen: (init: { url: string; title?: string; site?: Record<string, string | undefined> }) =>
       invoke<{ ok: boolean; error?: string }>(IPC.WEBHOME_OPEN, init),
@@ -295,7 +297,7 @@ const api = {
   bt: {
     detectPlayers: () => invoke<Array<{ id: string; name: string; path: string }>>(IPC.BT_DETECT_PLAYERS),
   },
-  /** ★ 2026-09-29 启动强制更新：检查 / 下载（进度事件）/ 拉起安装程序 */
+  /** ★ 2026-09-29 启动更新：检查 / 下载（进度事件）/ 拉起安装程序 */
   update: {
     check: () => invoke(IPC.UPDATE_CHECK),
     download: () => invoke(IPC.UPDATE_DOWNLOAD),
