@@ -79,6 +79,15 @@ export interface UiMemory {
   detail: Map<string, DetailMem>;
   /** 播放进度（秒）：键 = 播放 url */
   playTime: Map<string, number>;
+  /**
+   * ★ 2026-10-13（修「MPV 内核一开播就跳到片尾」）：**上次记录的媒体总时长**（秒），键同为播放 url。
+   *
+   * 为什么必须额外记时长：MPV 内核的续播点是**起播前**通过 `--start=` 传给 mpv 的，
+   *   那一刻视频还没加载、无从得知真实时长 —— 而「续播点是否已贴到片尾」只能拿时长比。
+   *   只记进度不记时长 ⇒ 上一集看到结尾（比如 44:50/45:00）后再点开，mpv 会真的从 44:50 起播，
+   *   播 10 秒就 EOF（观感＝「时间直接跳到最后」，见 RESUME_TAIL_GUARD）。
+   */
+  playDur: Map<string, number>;
   /** 最近一次播放来源（返回目标与回退用） */
   playSource: { fromKey: string; id: string; name: string } | null;
   /** 观看历史：键 = 播放 url（去重，一资源一记录） */
@@ -102,6 +111,7 @@ export const uiMem: UiMemory = {
   home: { key: '', tid: '', pg: 1, scrollTop: 0, filters: {}, search: null },
   detail: new Map(),
   playTime: new Map(),
+  playDur: new Map(),
   playSource: null,
   history: new Map(),
   deleted: new Map(),
@@ -495,6 +505,7 @@ export function saveUiMemory() {
     home,
     detail,
     playTime: Array.from(uiMem.playTime.entries()),
+    playDur: Array.from(uiMem.playDur.entries()),
     history: Array.from(map.entries()),
     deleted: tombstones,
   };
@@ -505,7 +516,7 @@ export function saveUiMemory() {
     try {
       localStorage.setItem(
         'tvboxUiMemory',
-        JSON.stringify({ home, detail: [], playTime: [], history: Array.from(map.entries()), deleted: tombstones }),
+        JSON.stringify({ home, detail: [], playTime: [], playDur: [], history: Array.from(map.entries()), deleted: tombstones }),
       );
     } catch {
       // ignore（彻底写不进去时静默，避免影响播放）
@@ -526,6 +537,7 @@ export function loadUiMemory() {
       uiMem.detail = new Map(data.detail || []);
     }
     uiMem.playTime = new Map(data.playTime || []);
+    uiMem.playDur = new Map(data.playDur || []);
     // ★ 2026-09-28：墓碑一起载入（本窗口内存 ∪ 盘上），再按墓碑过滤历史 —— 否则"删了再切回本页"会回弹
     uiMem.deleted = unionTombstones(uiMem.deleted, data.deleted);
     const h: Array<[string, unknown]> = data.history || [];
@@ -600,6 +612,7 @@ export function clearUiMemory() {
   uiMem.home = { key: '', tid: '', pg: 1, scrollTop: 0, filters: {}, search: null };
   uiMem.detail.clear();
   uiMem.playTime.clear();
+  uiMem.playDur.clear();
   uiMem.playSource = null;
   uiMem.history.clear();
   uiMem.deleted.clear(); // ★ 整表清空 = 显式意图，墓碑一并清掉（否则重新观看同一条会被自己的墓碑挡住）
@@ -614,6 +627,39 @@ export function clearUiMemory() {
 export function setPlayTime(url: string, sec: number): void {
   uiMem.playTime.set(url, sec);
   schedulePersist();
+}
+
+/** ★ 2026-10-13：媒体总时长写入（与 playTime 同键；只在拿到有效时长时写，见 resumeStart 的用途） */
+export function setPlayDur(url: string, sec: number): void {
+  const d = Number(sec);
+  if (!url || !Number.isFinite(d) || d <= 0) return;
+  uiMem.playDur.set(url, d);
+  schedulePersist();
+}
+
+/** 小于这个秒数不算「有效续播点」（片头前几秒跳过去反而突兀） */
+export const RESUME_MIN_SEC = 3;
+/**
+ * ★ 续播点距片尾多少秒以内 → 视为**已看完**，下次从头播（与 HTML5 内核口径一致）。
+ *   不设这道闸门的表现（★ 2026-10-13 用户报「MPV 内核播放，时间直接跳到最后」）：
+ *   上次看到 44:50（总长 45:00）→ playTime 记 2690 → 下次点开 mpv 收到 `--start=2690`
+ *   → 从 44:50 起播，10 秒后 EOF（画面停在末帧，观感就是"一打开就到片尾"）。
+ */
+export const RESUME_TAIL_GUARD = 5;
+
+/**
+ * 起播位置裁定（纯函数，可单测；HTML5 与 MPV 两个内核**共用同一口径**）。
+ *
+ * @param saved 上次播放位置（秒）；来自 `playTime` / 历史记录 / 内核交接点
+ * @param dur   已知总时长（秒）；**可以没有**（首次播放 → 此时无法判定贴尾，返回 saved）
+ * @returns 实际起播秒数（0 = 从头播）
+ */
+export function resumeStart(saved: unknown, dur?: unknown): number {
+  const t = Math.floor(Number(saved) || 0);
+  if (!Number.isFinite(t) || t <= RESUME_MIN_SEC) return 0;
+  const d = Number(dur) || 0;
+  if (d > 0 && t >= d - RESUME_TAIL_GUARD) return 0;
+  return t;
 }
 
 /**
