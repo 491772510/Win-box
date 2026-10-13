@@ -1,8 +1,9 @@
-import sys, zipfile, re, collections, os
+import sys, zipfile, re, collections
+from pathlib import Path
 
-jar = r"E:\Users\WXJ2\AppData\Roaming"  # placeholder, replaced below
 JAR = sys.argv[1]
-STUBS = r"E:\WorkBuddy\tvbox2\tvbox-win\resources\jvm\stubs\stubs.jar"
+# ★ 按脚本自身位置推导 stubs.jar —— 勿写死绝对路径（否则换台机器即 FileNotFoundError）
+STUBS = str(Path(__file__).resolve().parent / 'stubs' / 'stubs.jar')
 
 existing = set()
 zz = zipfile.ZipFile(STUBS)
