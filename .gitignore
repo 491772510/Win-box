@@ -41,6 +41,9 @@ docs/**
 !docs/macos-build.md
 # QA 验收报告（记录验证结论与遗留清单，有保留价值）
 !docs/qa-report-macos.md
+# mpv 内核版本排查手册（★ 2026-10-14：mpv nightly 构建回归会伪装成应用 bug，
+#   记录已知问题版本 + 三步排查法，换版本/排查播放异常时先看它）
+!docs/mpv-version.md
 
 # --- 专有 / 运行时 / 编译产物：不随源码分发 ---
 # mpv 播放内核（官方 v0.41.0 构建，约 100MB；GPL/LGPL，随安装包分发，不入源码库）
