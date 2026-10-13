@@ -118,32 +118,62 @@ export function resolvePkgFile(root: string, rel: string): string | null {
 const PKG_SUB_NAMES = ['影视.json', 'api.json', 'tvbox.json', 'tv.json', 'config.json', 'index.json'];
 
 /**
+ * 仅由 Python 蜘蛛组成的目录没有配置 JSON 时，生成一份最小可用订阅。
+ *
+ * 保留辅助文件，但不把 __init__.py 或 base/lib 等依赖目录中的脚本列成源。
+ * 返回的 api 使用包内相对路径，后续仍由 rewritePkgPaths 统一展开为 file://。
+ */
+export function generatePySubscription(files: readonly string[]): { rel: string; text: string; sites: number; generated: true } | null {
+  const pyFiles = files
+    .map((f) => f.replace(/\\/g, '/').replace(/^\.\//, ''))
+    .filter((f) => /\.py$/i.test(f) && !/(^|\/)__init__\.py$/i.test(f) &&
+      !/(^|\/)(base|lib|libs|__pycache__|\.venv|venv|site-packages)\//i.test(f))
+    .sort((a, b) => a.localeCompare(b));
+  // 只对纯 Python 文件夹生成配置；README、JSON 或其它资源存在时，仍要求
+  // 包内提供正式订阅 JSON，避免误把普通项目目录导入为影视源。
+  if (!pyFiles.length || files.some((f) => !/\.py$/i.test(f))) return null;
+
+  const used = new Set<string>();
+  const sites = pyFiles.map((rel) => {
+    const stem = rel.split('/').pop()!.replace(/\.py$/i, '') || 'Python源';
+    let key = stem;
+    let suffix = 2;
+    while (used.has(key)) key = `${stem}_${suffix++}`;
+    used.add(key);
+    return { key, name: stem, type: 3, api: `./${rel}` };
+  });
+  return { rel: '影视.json', text: JSON.stringify({ sites }, null, 2), sites: sites.length, generated: true };
+}
+
+/**
  * 在包根顶层文件里找订阅 JSON。
  * ① 命中候选名 → 直接用；② 否则扫 `*.json` 取「含 sites 数组且条数最多」的一份。
- * @param files 顶层文件名列表（不含目录）
+ * @param files 包内文件名列表（相对包根；可包含子目录）
  * @param readText 读文件内容（由调用方注入 fs，便于单测）
  */
 export function findPkgSubscription(
   files: readonly string[],
   readText: (name: string) => string,
-): { rel: string; text: string; sites: number } | null {
+): { rel: string; text: string; sites: number; generated?: boolean } | null {
   const lower = new Map(files.map((f) => [f.toLowerCase(), f]));
   for (const cand of PKG_SUB_NAMES) {
     const real = lower.get(cand.toLowerCase());
     if (!real) continue;
     const text = safeRead(readText, real);
-    if (text) return { rel: real, text, sites: countSites(text) };
+    if (text) return { rel: real, text, sites: countSites(text), generated: false };
   }
-  let best: { rel: string; text: string; sites: number } | null = null;
+  let best: { rel: string; text: string; sites: number; generated?: false } | null = null;
   for (const f of files) {
+    if (/[\\/]/.test(f)) continue; // Existing JSON packages still select only root subscriptions.
     if (!/\.json$/i.test(f)) continue;
     const text = safeRead(readText, f);
     if (!text) continue;
     const sites = countSites(text);
     if (sites <= 0) continue;
-    if (!best || sites > best.sites) best = { rel: f, text, sites };
+    if (!best || sites > best.sites) best = { rel: f, text, sites, generated: false };
   }
-  return best;
+  // 兼容只有 .py 文件的本地包：没有 JSON 时自动生成最小订阅。
+  return best || generatePySubscription(files);
 }
 
 function safeRead(readText: (name: string) => string, name: string): string {

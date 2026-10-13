@@ -1,5 +1,5 @@
 // src/main/update/UpdateService.ts
-// ★ 2026-09-29：启动强制更新（主进程侧）—— 查 GitHub 最新 Release → 版本比对 → 代理加速下载
+// ★ 2026-09-29：启动更新检查（主进程侧）—— 查 GitHub 最新 Release → 版本比对 → 代理加速下载
 //   Setup 安装包（带进度）→ 拉起安装程序。
 //
 // 依赖：undici（与全项目出站口径一致，走 `dispatchChain` 复用用户的网络代理设置）。
@@ -96,8 +96,8 @@ export class UpdateService {
           accelUrls: buildAccelUrls(chosen.browser_download_url),
         }
       : undefined;
-    if (newer && !asset) this.log.w(`更新检查：远端 ${rel.version} 更高，但未找到 .exe 安装包，跳过强制更新`);
-    if (newer && asset) this.log.i(`更新检查：本地 ${localVersion} < 远端 ${rel.version}，需强制更新（${asset.name}）`);
+    if (newer && !asset) this.log.w(`更新检查：远端 ${rel.version} 更高，但未找到 .exe 安装包，跳过更新提示`);
+    if (newer && asset) this.log.i(`更新检查：本地 ${localVersion} < 远端 ${rel.version}，提示用户更新（${asset.name}）`);
 
     this.lastAsset = asset || null;
     return {

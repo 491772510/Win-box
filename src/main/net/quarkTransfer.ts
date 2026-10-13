@@ -28,6 +28,7 @@ const SHARE_DOWNLOAD_Q = '?pr=ucpro&fr=h5';
 //  - file(建目录)、file/download、task(任务查询)、file/delete 只带基本 query（带 __dt/__t 会 400）
 const Q = '?pr=ucpro&fr=pc&uc_param_str=&__dt=&__t='; // share 系
 const QF = '?pr=ucpro&fr=pc&uc_param_str=';            // file 系 / task / delete
+const MEMBER_URL = `${BASE}/member?pr=ucpro&fr=pc&uc_param_str=&fetch_subscribe=true&_ch=home&fetch_identity=true`;
 /** 应用专用落盘目录名（用户可见、可自行清理；与用户自有文件隔离，杜绝误删） */
 export const QUARK_CACHE_DIR_NAME = 'Win-Box缓存';
 
@@ -213,6 +214,58 @@ async function quarkTransferInner(
     playCookie = puus ? applyCookie(cookie, '__puus', puus) : cookie;
   }
   return { url, header: { Referer: REF, 'User-Agent': UA, Cookie: playCookie }, ok: true, fid: ownFid, pdirFid: cacheDirFid };
+}
+
+/**
+ * Refresh the browser session cookie used by the JVM cloud-drive spiders.
+ *
+ * The account-info endpoint may return HTTP 200 while leaving the older
+ * `__puus` out of the supplied cookie.  The member endpoint is the endpoint
+ * used by the active Quark web client and, in that case, returns a fresh
+ * `Set-Cookie: __puus=...`.  Keep this operation separate from transfer so it
+ * can run once at application startup and before any spider is prewarmed.
+ *
+ * The returned cookie is safe to persist; callers must still avoid logging its
+ * value.  A failed refresh returns the original cookie and `changed=false` so
+ * an offline start does not discard a working session.
+ */
+export async function refreshQuarkCookieSession(
+  cookie: string,
+  fetcher: typeof globalThis.fetch = globalThis.fetch,
+): Promise<{ cookie: string; changed: boolean; status: number; setCookieKeys: string[] }> {
+  const original = String(cookie || '').trim();
+  if (!original) return { cookie: '', changed: false, status: 0, setCookieKeys: [] };
+  try {
+    const r = await fetcher(MEMBER_URL, {
+      method: 'GET',
+      headers: {
+        'User-Agent': UA,
+        Referer: REF,
+        Origin: REF.replace(/\/$/, ''),
+        Cookie: original,
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const setCookies = typeof r.headers.getSetCookie === 'function'
+      ? r.headers.getSetCookie()
+      : (() => {
+          const one = r.headers.get('set-cookie');
+          return one ? [one] : [];
+        })();
+    const setCookieKeys = setCookies
+      .map((line) => String(line).split(';', 1)[0].split('=', 1)[0].trim())
+      .filter(Boolean);
+    const body = await r.text();
+    let json: any = {};
+    try { json = JSON.parse(body); } catch { /* non-JSON response */ }
+    if (r.status !== 200 || json?.code !== 0) {
+      return { cookie: original, changed: false, status: r.status, setCookieKeys };
+    }
+    const refreshed = mergeSetCookies(original, setCookies);
+    return { cookie: refreshed, changed: refreshed !== original, status: r.status, setCookieKeys };
+  } catch {
+    return { cookie: original, changed: false, status: 0, setCookieKeys: [] };
+  }
 }
 
 /**

@@ -1,5 +1,5 @@
 // tests/update.spec.ts
-// 启动强制更新的纯逻辑单测：版本归一化/比较、是否需更新、加速地址拼接、
+// 启动更新的纯逻辑单测：版本归一化/比较、是否需更新、加速地址拼接、
 // Setup 安装包挑选、Release JSON 解析、字节格式化。零 Electron 依赖。
 import { describe, expect, it } from 'vitest';
 import {

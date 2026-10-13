@@ -53,6 +53,7 @@ export const IPC = {
   CFG_ADD_SOURCE: 'cfg:addSource',
   CFG_UPDATE_SOURCE: 'cfg:updateSource',
   CFG_DELETE_SOURCE: 'cfg:deleteSource',
+  CFG_DELETE_SOURCES: 'cfg:deleteSources',
   CFG_MOVE_SOURCE: 'cfg:moveSource',
   CFG_SET_ACTIVE_SOURCE: 'cfg:setActiveSource',
   CFG_SET_ACTIVE_LIVE: 'cfg:setActiveLive',
@@ -189,7 +190,7 @@ export const IPC = {
    *  点播外部播放器（探测 / 用当前播放地址拉起）—— 绑定值 `vodExternalPlayer` 与磁力分开 */
   VOD_DETECT_PLAYERS: 'vod:detectPlayers',
   VOD_OPEN_EXTERNAL: 'vod:openExternal',
-  // ★ 2026-09-29 启动强制更新：查 GitHub 最新 Release / 代理加速下载 Setup / 拉起安装程序
+  // ★ 2026-09-29 启动更新：查 GitHub 最新 Release / 代理加速下载 Setup / 拉起安装程序
   UPDATE_CHECK: 'update:check',
   UPDATE_DOWNLOAD: 'update:download',
   UPDATE_INSTALL: 'update:install',

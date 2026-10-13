@@ -8,7 +8,7 @@ import type { LocalPkgAccess } from '../store/LocalPkgStore';
 import { parsePkgUrl } from '../../engine/config/localPkg';
 import { getAdapter } from '../net/qr';
 import { runDriveWebLogin } from '../net/webLogin';
-import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid, extractEpisodeName, extractQuarkShare } from '../net/quarkTransfer';
+import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid, extractEpisodeName, extractQuarkShare, refreshQuarkCookieSession } from '../net/quarkTransfer';
 // ★ 2026-09-30：UC 分享取流（**免转存直链优先**，回退才转存；jar 侧那套 do=pan 路由桌面端没有）
 import { ucResolveShare, ucFileDelete, isUcSharePlay, extractUcShare } from '../net/ucTransfer';
 // ★ 2026-09-30：百度分享取流（**只能转存** —— 免转存的 share/list 子目录接口已被百度关停；
@@ -312,6 +312,10 @@ export class SpiderHost {
   private searchCache = new SearchCache<SearchAllReport>();
   /** 预热节流时间戳（配置应用/启动只冷启动有限的常驻蜘蛛进程） */
   private lastPrewarmAt = 0;
+  /** 启动前先完成网盘 cookie 同步/刷新，避免 JVM 初始化读到旧会话。 */
+  private prewarmEnabled = false;
+  /** 配置恢复时记录的 jar；待启动会话刷新完成后再触发桥接器预热。 */
+  private pendingWarmupJar = '';
   /** ★ 2026-09-27：运行期学到的「该源需要网盘绑定」源 key 集合 + 其持久化（见 markDriveBindNeeded） */
   private driveBindKeys = new Set<string>();
   private driveBindStore!: JsonStore;
@@ -530,8 +534,12 @@ export class SpiderHost {
   }
 
   cfgDeleteSource(key: string): void {
+    this.cfgDeleteSources([key]);
+  }
+
+  cfgDeleteSources(keys: readonly string[]): void {
     const before = this.manager.snapshot();
-    this.manager.deleteSource(key);
+    this.manager.deleteSources(keys);
     this.cleanupLocalImports(before);
   }
 
@@ -655,6 +663,41 @@ export class SpiderHost {
 
   // ---- 网盘/资源站凭据（绑定后供对应 csp_ 源调用） ----
   driveList() { return this.drives.list(); }
+  /** 允许启动阶段延迟的蜘蛛预热继续执行。 */
+  enablePrewarm(): void {
+    this.prewarmEnabled = true;
+    const jar = this.pendingWarmupJar;
+    this.pendingWarmupJar = '';
+    if (jar) this.bridge.warmup(jar).catch(() => undefined);
+  }
+  /**
+   * Refresh provider sessions before the JVM pool is prewarmed.
+   *
+   * Quark's web session can keep `__pus` valid while omitting the newer
+   * `__puus` until the member endpoint is visited.  The Pizazz/fty spiders
+   * read their cookie once during init, so doing this after prewarm leaves a
+   * permanently stale JVM until the next reset.  Only cookie names/lengths are
+   * logged; values never enter diagnostics.
+   */
+  async refreshDriveSessions(): Promise<void> {
+    const tokens = this.drives.list();
+    const quark = tokens.quark || '';
+    if (!quark) return;
+    const r = await refreshQuarkCookieSession(quark);
+    const names = r.cookie
+      .split(';')
+      .map((part) => part.slice(0, part.indexOf('=')).trim())
+      .filter(Boolean);
+    this.logger.i(
+      `网盘会话刷新 quark status=${r.status} changed=${r.changed} ` +
+      `cookieLen=${r.cookie.length} setCookieKeys=${r.setCookieKeys.join(',') || '-'} ` +
+      `keys=${[...new Set(names)].join(',')}`,
+    );
+    if (!r.changed) return;
+    this.drives.set('quark', r.cookie);
+    this.syncDriveFiles();
+    this.resetSpidersAfterDriveChange();
+  }
   /**
    * ★ 2026-09-26：本地代理 `/proxy/<jvmPort>` 被访问 → 把该蜘蛛 JVM 钉住（播放期间不回收）。
    *   壳/蜘蛛的 `<entry>?do=proxy&key=…` 播放地址靠它取流，JVM 一被回收就断流。
@@ -2747,7 +2790,10 @@ export class SpiderHost {
     if (normalized === this.lastSpiderJar) return;
     this.lastSpiderJar = normalized;
     this.bridge.setDefaultJar(normalized);
-    if (normalized) this.bridge.warmup(normalized).catch(() => undefined);
+    if (normalized) {
+      if (this.prewarmEnabled) this.bridge.warmup(normalized).catch(() => undefined);
+      else this.pendingWarmupJar = normalized;
+    }
   }
 
   /** 用户配置每次变更（含启动恢复/导入替换/增删改排序/选中源）后同步内存态 */
@@ -2794,10 +2840,15 @@ export class SpiderHost {
     // ★ 预热常驻蜘蛛进程（延后 1s：只要不抢窗口首帧即可，越早预热用户越早受益）。
     //   深度预热（__warm__：加载类 + 预建实例）覆盖前 3 个不同 key。
     //   ★ 2026-09-24 起同时调度 .py 源预热（脚本 + 嵌入式 Python 运行时）——见 prewarmPythonSources。
-    setTimeout(() => {
+    const schedule = () => {
+      if (!this.prewarmEnabled) {
+        setTimeout(schedule, 250).unref?.();
+        return;
+      }
       try { this.prewarmSpiders(3, 1); } catch { /* 预热失败静默 */ }
       try { this.prewarmPythonSources(); } catch { /* 预热失败静默 */ }
-    }, 1000).unref?.();
+    };
+    setTimeout(schedule, 1000).unref?.();
   }
 }
 

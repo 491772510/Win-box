@@ -17,13 +17,14 @@ vi.mock('electron', () => ({
   },
 }));
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import {
   encodePkgRel,
+  generatePySubscription,
   findPkgSubscription,
   normalizePkgRoot,
   parsePkgUrl,
@@ -138,6 +139,22 @@ describe('findPkgSubscription', () => {
     expect(findPkgSubscription(['a.json'], () => '{"lives":[]}')).toBeNull();
     expect(findPkgSubscription([], () => '')).toBeNull();
   });
+
+  it('只有 .py 文件时自动生成最小订阅 JSON', () => {
+    const got = findPkgSubscription(['a.py', 'b.py'], () => '');
+    expect(got?.rel).toBe('影视.json');
+    expect(got?.sites).toBe(2);
+    expect(JSON.parse(got!.text).sites).toEqual([
+      { key: 'a', name: 'a', type: 3, api: './a.py' },
+      { key: 'b', name: 'b', type: 3, api: './b.py' },
+    ]);
+  });
+
+  it('生成订阅时跳过 Python 包依赖目录和 __init__.py', () => {
+    const got = generatePySubscription(['open.py', 'base/helper.py', 'base/__init__.py', '__init__.py']);
+    expect(got?.sites).toBe(1);
+    expect(JSON.parse(got!.text).sites[0].api).toBe('./open.py');
+  });
 });
 
 describe('rewritePkgPaths — 包内相对引用展开', () => {
@@ -250,6 +267,88 @@ describe('LocalPkgStore — 登记 / 找订阅 / 读订阅', () => {
     const empty = tmpDir('empty');
     writeFileSync(join(empty, 'readme.txt'), 'x');
     expect(store.locateSubscription(empty)).toBeNull();
+  });
+
+  it('只有 .py 文件的目录 → 按用户名称生成 JSON，原目录不被修改', () => {
+    const pyOnly = tmpDir('py-only');
+    writeFileSync(join(pyOnly, 'alpha.py'), 'class Spider: pass\n');
+    writeFileSync(join(pyOnly, 'beta.py'), 'class Spider: pass\n');
+    const found = store.importSubscription(pyOnly, '测试订阅')!;
+    expect(found.rel).toBe('测试订阅.json');
+    expect(found.sites).toBe(2);
+    expect(existsSync(join(pyOnly, '影视.json'))).toBe(false);
+    expect(readFileSync(join(store.rootOf(found.index)!, found.rel), 'utf8')).toContain('./alpha.py');
+  });
+
+  it('探测或缺少名称时不复制、不登记、不生成文件', () => {
+    const pyOnly = tmpDir('py-inspect');
+    writeFileSync(join(pyOnly, 'safe.py'), 'class Spider: pass\n');
+    const before = store.list();
+    expect(store.inspectSubscription(pyOnly)).toMatchObject({ generated: true, sites: 1 });
+    expect(store.list()).toEqual(before);
+    expect(existsSync(join(pyOnly, '影视.json'))).toBe(false);
+    for (const name of [undefined, '', '   ', '...', '.json', 'CON', 'nul.json']) {
+      expect(() => store.importSubscription(pyOnly, name)).toThrow();
+    }
+    expect(store.list()).toEqual(before);
+  });
+
+  it('每次导入使用独立副本和用户名称，已有 .json 后缀不重复追加', () => {
+    const pyOnly = tmpDir('py-repeat');
+    writeFileSync(join(pyOnly, 'safe.py'), 'class Spider: pass\n');
+    const first = store.importSubscription(pyOnly, '第一份.json')!;
+    const second = store.importSubscription(pyOnly, '第二份')!;
+    const third = store.importSubscription(pyOnly, '第一份.json')!;
+    expect(first.rel).toBe('第一份.json');
+    expect(second.rel).toBe('第二份.json');
+    expect(third.rel).toBe('第一份.json');
+    expect(new Set([first.index, second.index, third.index]).size).toBe(3);
+    expect(store.rootOf(first.index)).not.toBe(store.rootOf(third.index));
+    expect(store.readSubscription(first.index, first.rel)).not.toBeNull();
+  });
+
+  it('已有正式 JSON 的包保留原订阅文件名，不按自填名称生成新文件', () => {
+    const original = tmpDir('json-preserve');
+    const data = tmpDir('json-preserve-store');
+    writeFileSync(join(original, '自带.json'), '{"sites":[{"key":"safe","type":3,"api":"./safe.py"}]}');
+    writeFileSync(join(original, 'safe.py'), 'class Spider: pass\n');
+    const pkgs = new LocalPkgStore(new JsonStore(join(data, 'pkgs.json')), 'http://127.0.0.1:9978');
+    const found = pkgs.importSubscription(original, '订阅展示名')!;
+    expect(found.rel).toBe('自带.json');
+    expect(existsSync(join(pkgs.rootOf(found.index)!, '订阅展示名.json'))).toBe(false);
+  });
+
+  it('自定义生成的订阅在登记表重载后仍可读取', () => {
+    const original = tmpDir('py-restart');
+    const data = tmpDir('py-restart-store');
+    const file = join(data, 'pkgs.json');
+    writeFileSync(join(original, '中文源.py'), 'class Spider: pass\n');
+    const pkgs = new LocalPkgStore(new JsonStore(file), 'http://127.0.0.1:9978');
+    const found = pkgs.importSubscription(original, '重启后的订阅')!;
+    const again = new LocalPkgStore(new JsonStore(file), 'http://127.0.0.1:9978');
+    const read = again.readSubscription(found.index, found.rel)!;
+    expect(JSON.parse(read.text).sites[0].api).toBe(pathToFileURL(join(again.rootOf(found.index)!, '中文源.py')).href);
+    expect(pkgSubUrl(found.index, found.rel)).toBe(`pkg://${found.index}/重启后的订阅.json`);
+  });
+
+  it('纯 Python 包按用户名称生成 JSON，扩展名自动补齐且原目录不写入', () => {
+    const pyOnly = tmpDir('py-named');
+    writeFileSync(join(pyOnly, '中文源.py'), 'class Spider: pass\n');
+    const found = store.importSubscription(pyOnly, '我的 Python 源')!;
+    expect(found.rel).toBe('我的 Python 源.json');
+    expect(existsSync(join(pyOnly, '我的 Python 源.json'))).toBe(false);
+    const managedRoot = store.rootOf(found.index)!;
+    expect(existsSync(join(managedRoot, found.rel))).toBe(true);
+    expect(JSON.parse(readFileSync(join(managedRoot, found.rel), 'utf8')).sites[0].api).toBe('./中文源.py');
+  });
+
+  it('用户名称中的路径/保留字符不会逃出托管包目录', () => {
+    const pyOnly = tmpDir('py-name-safe');
+    writeFileSync(join(pyOnly, 'safe.py'), 'class Spider: pass\n');
+    const found = store.importSubscription(pyOnly, '../危险:name*')!;
+    expect(found.rel).toBe('.._危险_name_.json');
+    expect(found.rel.includes('/')).toBe(false);
+    expect(existsSync(join(store.rootOf(found.index)!, found.rel))).toBe(true);
   });
 });
 

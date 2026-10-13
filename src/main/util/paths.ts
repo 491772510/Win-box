@@ -8,8 +8,20 @@ export function userDataDir(): string {
   return app.getPath('userData');
 }
 
-/** Local imports are owned copies, never files in the user's selected folder. */
+/**
+ * Local imports are owned copies, never files in the user's selected folder.
+ *
+ * Keep them under userData rather than beside the executable.  An installed
+ * application may be read-only (or protected by security software), and a
+ * Python source copied beside the executable can be quarantined before the
+ * next request.  Packages and standalone .py imports use this same root.
+ */
 export function localImportsDir(): string {
+  return join(userDataDir(), 'imports');
+}
+
+/** Previous location used by builds before local imports moved to userData. */
+export function legacyLocalImportsDir(): string {
   const installDir = app.isPackaged
     ? process.env.PORTABLE_EXECUTABLE_DIR || dirname(app.getPath('exe'))
     : app.getAppPath();

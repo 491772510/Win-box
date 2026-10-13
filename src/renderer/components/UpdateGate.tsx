@@ -1,15 +1,15 @@
 // src/renderer/components/UpdateGate.tsx
-// ★ 2026-09-29：启动强制更新门禁 —— 启动即比对本地版本与 GitHub 最新 Release；
-//   若本地更低则**遮挡全界面**（不更新不可用），自动代理加速下载 Setup 安装包并拉起安装程序。
+// ★ 2026-10-13：启动更新提示 —— 启动时比对本地版本与 GitHub 最新 Release；
+//   发现新版本后由用户选择「立即更新」或「暂不更新」，不再强制锁死软件。
 //
-// 红线：检查失败（网络不通等）**绝不锁死软件** —— 直接放行；只有「检查成功且远端更高」才门禁。
+// 红线：检查失败（网络不通等）**绝不影响软件使用** —— 直接放行。
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { client } from '../api/client';
 import { formatBytes, type UpdateCheckResult, type UpdateProgress } from '../../shared/update';
 import { isDetailWinHash } from '../../shared/detailWin';
 import { isSearchWindow } from '../lib/searchWin';
 
-/** 独立播放器窗口（`#/player`）不参与门禁：更新由主窗口统一触发 */
+/** 独立播放器窗口（`#/player`）不参与启动提示：更新由主窗口统一触发 */
 function isPlayerWindow(): boolean {
   try {
     return window.location.hash.startsWith('#/player');
@@ -21,14 +21,16 @@ function isPlayerWindow(): boolean {
 export default function UpdateGate({ children }: { children: ReactNode }) {
   /**
    * ★ 2026-10-08（用户要求「详情页独立窗口」）：详情窗口同样跳过门禁 —— 它只是主窗口的副本窗口，
-   *   门禁/下载由主窗口统一负责（否则两个窗口各下一次 Setup）。
+   *   提示/下载由主窗口统一负责（否则两个窗口各下一次 Setup）。
    */
   const skip = isPlayerWindow() || isDetailWinHash(window.location.hash) || isSearchWindow();
   const [info, setInfo] = useState<UpdateCheckResult | null>(null);
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
   const started = useRef(false);
+  const downloading = useRef(false);
 
   // 订阅下载进度（主进程推送）
   useEffect(() => {
@@ -43,8 +45,11 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
   }, [skip]);
 
   const downloadAndInstall = async (): Promise<void> => {
+    if (downloading.current) return;
+    downloading.current = true;
     setBusy(true);
     setError('');
+    setProgress({ phase: 'speedtest', received: 0, total: info?.asset?.size || 0, percent: 0, speed: 0 });
     try {
       const dl = await client.updateDownload();
       if (!dl.ok) {
@@ -57,6 +62,8 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
+    } finally {
+      downloading.current = false;
     }
   };
 
@@ -69,9 +76,6 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
         const r = await client.updateCheck();
         if (!r.updateAvailable || !r.asset) return; // 已是最新 / 检查失败 → 放行
         setInfo(r);
-        // ★ 2026-09-30：先进入「测速」阶段文案（主进程测完会推最快线路，再进下载阶段）
-        setProgress({ phase: 'speedtest', received: 0, total: r.asset.size, percent: 0, speed: 0 });
-        void downloadAndInstall();
       } catch {
         /* 检查失败：不锁死软件 */
       }
@@ -79,9 +83,8 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [skip]);
 
-  if (!info) return <>{children}</>;
-
-  const total = progress?.total || info.asset?.size || 0;
+  const visible = !!info && !dismissed && !skip;
+  const total = progress?.total || info?.asset?.size || 0;
   const received = progress?.received || 0;
   const percent = progress?.phase === 'done' || progress?.phase === 'launching' ? 100 : progress?.percent || 0;
   const launching = progress?.phase === 'launching';
@@ -93,35 +96,48 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
       ? '安装程序已启动，即将退出本程序…'
       : speedtest
         ? progress?.message || '正在测速选择最快的下载线路…'
-        : `正在下载 ${info.asset?.name || ''}`;
+        : `正在下载 ${info?.asset?.name || ''}`;
+
+  const date = info?.publishedAt ? new Date(info.publishedAt) : null;
+  const publishedAt = date && Number.isFinite(date.getTime())
+    ? date.toLocaleDateString('zh-CN')
+    : '';
+  const notes = info?.releaseNotes?.trim() || '本次版本暂无详细更新说明。';
 
   return (
     <>
-      {/* 底层界面仍然渲染，但被整屏遮罩锁死（不可交互） */}
-      <div className="upd-blur" aria-hidden="true">
+      {/* 保持页面容器稳定，提示出现/关闭时不重新挂载页面或丢失浏览状态。 */}
+      <div className={visible ? 'upd-blur' : undefined} aria-hidden={visible || undefined} inert={visible || undefined}>
         {children}
       </div>
-      <div className="upd-overlay">
-        <div className="card upd-card">
-          <h3 style={{ margin: '0 0 4px' }}>发现新版本</h3>
+      {visible && info && <div className="upd-overlay">
+        <div className="card upd-card" role="dialog" aria-modal="true" aria-labelledby="update-title">
+          <h3 id="update-title" style={{ margin: '0 0 4px' }}>发现新版本</h3>
           <div className="muted upd-vers">
             <b>{info.localVersion}</b> → <b>{info.remoteVersion}</b>
-            {' · '}
-            需更新后才能继续使用
+            {publishedAt ? ` · 发布于 ${publishedAt}` : ''}
           </div>
+          <div className="muted upd-hint">可暂不更新，继续使用当前版本；下次启动时会再次检查。</div>
 
-          {!error && (
+          {!busy && !error && (
             <>
-              <div className="upd-bar">
+              <div className="upd-notes-title">更新说明</div>
+              <div className="upd-notes">{notes}</div>
+            </>
+          )}
+
+          {(busy || error) && (
+            <>
+              {!error && <div className="upd-bar">
                 <div className="upd-fill" style={{ width: `${Math.max(2, Math.min(100, percent))}%` }} />
-              </div>
+              </div>}
               <div className="upd-status">
                 <span className="muted">{statusText}</span>
-                <span className="muted">
+                {!error && <span className="muted">
                   {launching || speedtest ? '' : `${formatBytes(received)} / ${formatBytes(total)} · ${percent}%`}
-                </span>
+                </span>}
               </div>
-              {!launching && !speedtest && !!progress?.speed && (
+              {!error && !launching && !speedtest && !!progress?.speed && (
                 <div className="muted upd-speed">{formatBytes(progress.speed)}/s</div>
               )}
             </>
@@ -137,14 +153,29 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
           )}
 
           <div className="row upd-actions">
+            {!busy && !error && (
+              <>
+                <button autoFocus style={{ flex: 0 }} onClick={() => setDismissed(true)}>
+                  暂不更新
+                </button>
+                <button className="primary" style={{ flex: 0 }} onClick={() => void downloadAndInstall()}>
+                  立即更新
+                </button>
+              </>
+            )}
             {error && (
-              <button className="primary" style={{ flex: 0 }} disabled={busy} onClick={() => void downloadAndInstall()}>
-                重试
-              </button>
+              <>
+                <button style={{ flex: 0 }} onClick={() => setDismissed(true)}>
+                  暂不更新
+                </button>
+                <button className="primary" style={{ flex: 0 }} disabled={busy} onClick={() => void downloadAndInstall()}>
+                  重试
+                </button>
+              </>
             )}
           </div>
         </div>
-      </div>
+      </div>}
     </>
   );
 }

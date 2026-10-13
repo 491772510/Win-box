@@ -70,6 +70,7 @@ declare global {
         addSource: (bean: SourceBean) => Promise<IpcResult<SourceBean>>;
         updateSource: (key: string, patch: SourceUpdatePatch) => Promise<IpcResult<SourceBean>>;
         deleteSource: (key: string) => Promise<IpcResult<void>>;
+        deleteSources: (keys: string[]) => Promise<IpcResult<void>>;
         moveSource: (key: string, direction: SourceMoveDirection) => Promise<IpcResult<void>>;
         setActiveSource: (key: string) => Promise<IpcResult<void>>;
         setActiveLive: (index: number) => Promise<IpcResult<void>>;
@@ -82,8 +83,8 @@ declare global {
         importLiveLocal: () =>
           Promise<IpcResult<{ ok: boolean; name?: string; index?: number; replaced?: boolean; total?: number; error?: string }>>;
         /** ★ 2026-09-29：导入本地包（目录包：影视.json + py/js/jar/html/xbpq） */
-        importPackage: (name?: string) =>
-          Promise<IpcResult<{ ok: boolean; root?: string; rel?: string; sites?: number; name?: string; error?: string; warnings?: string[]; result?: ImportReturn }>>;
+        importPackage: (args?: { name?: string; root?: string }) =>
+          Promise<IpcResult<{ ok: boolean; root?: string; rel?: string; sites?: number; name?: string; needsName?: boolean; error?: string; warnings?: string[]; result?: ImportReturn }>>;
         /** ★ 2026-09-29 本地包「网页源」：独立窗口打开 homePage html（fm 桥） */
         webHomeOpen: (init: { url: string; title?: string; site?: Record<string, string | undefined> }) =>
           Promise<IpcResult<{ ok: boolean; error?: string }>>;
@@ -256,7 +257,7 @@ declare global {
       bt: {
         detectPlayers: () => Promise<IpcResult<Array<{ id: string; name: string; path: string }>>>;
       };
-      /** ★ 2026-09-29 启动强制更新 */
+      /** 启动可选更新 */
       update: {
         check: () => Promise<IpcResult<UpdateCheckResult>>;
         download: () => Promise<IpcResult<{ ok: boolean; path?: string; error?: string }>>;
@@ -284,6 +285,7 @@ export const client = {
   cfgAddSource: (bean: SourceBean) => unwrap(window.api.config.addSource(bean)),
   cfgUpdateSource: (key: string, patch: SourceUpdatePatch) => unwrap(window.api.config.updateSource(key, patch)),
   cfgDeleteSource: (key: string) => unwrap(window.api.config.deleteSource(key)),
+  cfgDeleteSources: (keys: string[]) => unwrap(window.api.config.deleteSources(keys)),
   cfgMoveSource: (key: string, direction: SourceMoveDirection) => unwrap(window.api.config.moveSource(key, direction)),
   cfgSetActiveSource: (key: string) => unwrap(window.api.config.setActiveSource(key)),
   cfgSetActiveLive: (index: number) => unwrap(window.api.config.setActiveLive(index)),
@@ -291,7 +293,7 @@ export const client = {
   cfgImportJsonLocal: (name?: string) => unwrap(window.api.config.importJsonLocal(name)),
   cfgImportPyLocal: () => unwrap(window.api.config.importPyLocal()),
   /** ★ 2026-09-29：导入本地包（目录包）—— 返回包根/命中订阅/源数，用于结果提示 */
-  cfgImportPackage: (name?: string) => unwrap(window.api.config.importPackage(name)),
+  cfgImportPackage: (name?: string, root?: string) => unwrap(window.api.config.importPackage({ name, root })),
   /** ★ 2026-09-29 本地包「网页源」：独立窗口打开 homePage html（fm 桥） */
   webHomeOpen: (init: { url: string; title?: string; site?: Record<string, string | undefined> }) =>
     unwrap(window.api.config.webHomeOpen(init)),
@@ -437,7 +439,7 @@ export const client = {
   vodDetectPlayers: () => unwrap(window.api.vod.detectPlayers()),
   /** `seek`（秒）：显式绑定外部播放器时，从历史续播的位置（按播放器类型拼起播参数） */
   vodOpenExternal: (url: string, path?: string, seek?: number) => unwrap(window.api.vod.openExternal({ url, path, seek })),
-  /** ★ 2026-09-29 启动强制更新：检查 / 下载 / 拉起安装程序（进度走 onUpdateProgress） */
+  /** ★ 2026-09-29 启动更新：检查 / 下载 / 拉起安装程序（进度走 onUpdateProgress） */
   updateCheck: () => unwrap(window.api.update.check()),
   updateDownload: () => unwrap(window.api.update.download()),
   updateInstall: () => unwrap(window.api.update.install()),

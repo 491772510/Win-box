@@ -1,13 +1,12 @@
 // src/shared/update.ts
-// 启动强制更新的契约与纯函数 —— 主/渲染层共用（零依赖，不含 electron）。
+// 启动更新提示的契约与纯函数 —— 主/渲染层共用（零依赖，不含 electron）。
 //
-// ★ 2026-09-29 口径（用户指令）：启动时比对本地版本与 GitHub 最新 Release；若本地更低
-//   **强制更新**（不更新无法使用软件）→ 自动从「代理加速的 GitHub」下载最新 **Setup 安装包**
-//   → 自动拉起安装程序。
+// ★ 2026-10-13 口径：启动时比对本地版本与 GitHub 最新 Release；若本地更低，
+//   展示更新说明并由用户选择是否从「代理加速的 GitHub」下载 Setup 安装包。
 //
 // 设计红线（务必遵守）：
 //   ① **检查失败绝不锁死软件** —— 网络不通/接口异常时 updateAvailable 必须为 false，正常放行。
-//   ② 只有「远端版本更高 **且** 找到可用的 Setup 安装包」才会强制更新（updateAvailable = true）。
+//   ② 只有「远端版本更高 **且** 找到可用的 Setup 安装包」才展示更新提示（updateAvailable = true）。
 //   ③ 加速前缀按顺序尝试，最后回退 **直连** github.com（加速站失效不致命）。
 
 /** 发布仓库（唯一来源） */
@@ -176,7 +175,7 @@ export interface UpdateCheckResult {
   remoteVersion: string;
   /** 远端 tag 原文 */
   tag: string;
-  /** 需要强制更新（远端更高且拿到 Setup 安装包） */
+  /** 有可用更新（远端更高且拿到 Setup 安装包）；是否安装由用户决定 */
   updateAvailable: boolean;
   /** 检查失败原因（此时 updateAvailable 必为 false，绝不锁死软件） */
   error?: string;
@@ -298,7 +297,7 @@ export function buildAccelUrls(url: string, prefixes: string[] = GH_ACCEL_PREFIX
 /**
  * 从 Release 资产里挑出 **Setup 安装包**（`Win-Box.Setup.x.y.z.exe`）。
  * 匹配顺序：名字含 setup 的 .exe → 名字含目标版本者优先 → 其余 .exe 兜底。
- * 找不到任何 .exe → null（此时不做强制更新）。
+ * 找不到任何 .exe → null（此时不展示更新提示）。
  */
 export function pickSetupAsset(assets: ReleaseAssetInput[], version?: string): ReleaseAssetInput | null {
   const list = Array.isArray(assets) ? assets : [];

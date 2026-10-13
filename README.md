@@ -9,7 +9,7 @@
 
 **链接**：[GitHub 主页](https://github.com/yagami-hue/Win-box) · [爱发电 · 赞助](https://afdian.com/a/WinBox)（自愿，见文末说明）
 
-**当前版本：1.20.5** · [下载](https://github.com/yagami-hue/Win-box/releases/tag/release1.20.5) · [更新记录](CHANGELOG.md)
+**当前版本：1.21.2** · [下载](https://github.com/yagami-hue/Win-box/releases/tag/release1.21.2) · [更新记录](CHANGELOG.md)
 
 ---
 
@@ -50,7 +50,7 @@ pnpm run release:upload              # 上传到已创建的 release<版本号>
 上传脚本默认使用本机 `127.0.0.1:7897` HTTPS 代理加速 GitHub CLI；可用 `GH_UPLOAD_PROXY` 指定代理，设置为 `direct`（或 `none`）则直连。
 
 上传命令读取 `package.json` 的版本和输出目录，只选择当前版本的 Setup / 可选 portable `.exe`；不自动创建 Release、修改正文或覆盖已有附件。
-electron-builder 会规范化安装包文件名中的数字版本（例如 `1.21.01` 变为 `1.21.1`）；上传脚本兼容两种文件名，但 Release 标签仍使用 `package.json` 的原始版本。
+electron-builder 会规范化安装包文件名中的数字版本；上传脚本兼容规范化后的安装包文件名，Release 标签使用 `package.json` 的版本号。
 
 源码仓库的支持作者图片为纯空白占位图。正式发行构建可设置 `WINBOX_SUPPORT_IMAGE` 为本机图片路径；原图放在已忽略的 `.tmp/` 中，不提交到源码仓库，也不单独上传为 Release 附件。
 

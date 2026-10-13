@@ -69,6 +69,8 @@ export class LocalPkgStore implements LocalPkgAccess {
     /** 本地代理基址（`http://127.0.0.1:9978`） */
     private proxyBase: string,
     private importsDir = join(dirname(store.filePath), 'imports'),
+    /** Builds before 1.21.01 stored copies beside the executable. */
+    private legacyImportsDir = '',
   ) {}
 
   list(): LocalPkgEntry[] {
@@ -98,13 +100,19 @@ export class LocalPkgStore implements LocalPkgAccess {
   }
 
   /** Copy the entire package, preserving Python imports and all sibling resources. */
-  importSubscription(root: string): ReturnType<LocalPkgStore['locateSubscription']> {
+  importSubscription(root: string, generatedName?: string): ReturnType<LocalPkgStore['locateSubscription']> {
     const source = resolve(root);
-    const files = readdirSync(source, { withFileTypes: true }).filter(d => d.isFile()).map(d => d.name);
-    if (!findPkgSubscription(files, name => readFileSync(join(source, name), 'utf-8'))) return null;
+    const subscription = this.inspectSubscription(source);
+    if (!subscription) return null;
+    if (subscription.generated) subscription.rel = generatedJsonName(generatedName || '');
     const target = join(this.importsDir, 'packages', randomUUID());
     this.copyPackage(source, target);
     try {
+      // Generated subscriptions are intentionally written only to the managed
+      // copy. The user's original .py-only directory remains untouched.
+      if (!existsSync(join(target, subscription.rel))) {
+        writeFileSync(join(target, subscription.rel), subscription.text, { encoding: 'utf-8', flag: 'wx' });
+      }
       const found = this.locateSubscription(target);
       if (!found) throw new Error('复制后的本地包没有可用订阅');
       const entries = this.list();
@@ -115,6 +123,31 @@ export class LocalPkgStore implements LocalPkgAccess {
       rmSync(target, { recursive: true, force: true });
       throw e;
     }
+  }
+
+  /** Inspect a directory without registering it or copying any files. */
+  inspectSubscription(root: string): ReturnType<typeof findPkgSubscription> {
+    const source = resolve(root);
+    const files = this.packageFiles(source);
+    return findPkgSubscription(files, name => {
+      const abs = resolvePkgFile(source, name);
+      return abs && existsSync(abs) ? readFileSync(abs, 'utf-8') : '';
+    });
+  }
+
+  /** Return all regular files relative to a package root (directories omitted). */
+  private packageFiles(root: string): string[] {
+    const out: string[] = [];
+    const visit = (dir: string, prefix: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) visit(join(dir, entry.name), rel);
+        else if (entry.isFile()) out.push(rel);
+        else if (entry.isSymbolicLink()) out.push(rel);
+      }
+    };
+    try { visit(root, ''); } catch { return []; }
+    return out;
   }
 
   private copyPackage(source: string, target: string): void {
@@ -140,6 +173,20 @@ export class LocalPkgStore implements LocalPkgAccess {
     const target = join(this.importsDir, 'py', randomUUID(), basename(source));
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, content);
+    // A scanner may quarantine an imported script immediately.  Fail at the
+    // import boundary with an actionable message instead of saving a source
+    // that later reports the misleading “本地 .py 文件不存在”.
+    try {
+      const copied = existsSync(target) ? readFileSync(target) : null;
+      if (!copied || copied.length !== content.length || !copied.equals(content)) {
+        rmSync(dirname(target), { recursive: true, force: true });
+        throw new Error('本地 .py 副本写入后不可读取，可能已被杀毒软件隔离；请先检查安全软件的隔离记录后重试');
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.includes('杀毒软件')) throw e;
+      rmSync(dirname(target), { recursive: true, force: true });
+      throw new Error('本地 .py 副本校验失败，可能已被杀毒软件隔离；请先检查安全软件的隔离记录后重试');
+    }
     this.store.setObject(LOCAL_PY_KEY, [...this.store.getObject<string[]>(LOCAL_PY_KEY, []), target]);
     this.store.flush();
     return pathToFileURL(target).href;
@@ -230,10 +277,15 @@ export class LocalPkgStore implements LocalPkgAccess {
     }
     // Standalone scripts from the old local-py store already belong to the app;
     // copy them too, but leave old files intact during migration.
-    const legacy = join(dirname(this.store.filePath), 'local-py');
+    const legacyRoots = [join(dirname(this.store.filePath), 'local-py'), this.legacyImportsDir]
+      .filter((root, i, all) => !!root && all.indexOf(root) === i);
     for (const value of references(config)) {
       const file = localFile(value);
-      if (file && inside(legacy, file) && existsSync(file) && !replacements.some(([from]) => from === pathToFileURL(file).href)) {
+      if (file && legacyRoots.some(root => inside(root, file)) && existsSync(file) &&
+        // A managed package has already been copied above; do not duplicate
+        // each of its sibling .py files as standalone imports.
+        !replacements.some(([from]) => pathToFileURL(file).href.startsWith(from)) &&
+        !replacements.some(([from]) => from === pathToFileURL(file).href)) {
         try { replacements.push([pathToFileURL(file).href, this.importPython(file)]); }
         catch (e) { warn(`Python 副本迁移失败（原文件保留）：${file} — ${String(e)}`); }
       }
@@ -273,9 +325,7 @@ export class LocalPkgStore implements LocalPkgAccess {
     if (!existsSync(r)) return null;
     let files: string[] = [];
     try {
-      files = readdirSync(r, { withFileTypes: true })
-        .filter((d) => d.isFile())
-        .map((d) => d.name);
+      files = this.packageFiles(r);
     } catch {
       return null;
     }
@@ -288,4 +338,19 @@ export class LocalPkgStore implements LocalPkgAccess {
     const out = rewritePkgPaths(found.text, { index, root: r, proxyBase: this.proxyBase });
     return { index, rel: found.rel, text: out.text, warnings: out.warnings, sites: found.sites };
   }
+}
+
+/** 用户命名的自动生成订阅文件名：只保留文件名，不允许目录穿越或 Windows 保留字符。 */
+function generatedJsonName(value: string): string {
+  const name = String(value || '')
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    .replace(/[. ]+$/g, '')
+    .replace(/^\.+$/, '');
+  if (!name) throw new Error('本地 Python 包名称不能为空或不合法');
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) {
+    throw new Error('此名称是 Windows 保留文件名，请换一个名称');
+  }
+  if (name.toLowerCase() === '.json') throw new Error('请填写 JSON 文件名，不能只有扩展名');
+  return name.toLowerCase().endsWith('.json') ? name : `${name}.json`;
 }

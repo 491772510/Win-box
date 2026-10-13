@@ -1,8 +1,43 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { resolveShareFile, extractEpisodeFid, extractEpisodeName, episodeKeyOf, matchTransferredFile, isQuarkSharePlay, extractQuarkShare, isDirNode, isRealFileNode, quarkPlayUrl, quarkTransfer, quarkFileDelete, QUARK_CACHE_DIR_NAME, SESSION_DIR_PREFIX, sessionDirName } from '../src/main/net/quarkTransfer';
+import { resolveShareFile, extractEpisodeFid, extractEpisodeName, episodeKeyOf, matchTransferredFile, isQuarkSharePlay, extractQuarkShare, isDirNode, isRealFileNode, quarkPlayUrl, quarkTransfer, quarkFileDelete, refreshQuarkCookieSession, QUARK_CACHE_DIR_NAME, SESSION_DIR_PREFIX, sessionDirName } from '../src/main/net/quarkTransfer';
 import type { ShareListFetcher } from '../src/main/net/quarkTransfer';
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe('refreshQuarkCookieSession', () => {
+  it('合并 member 响应的新 __puus，但不把 cookie 值写入诊断结果', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: {
+        getSetCookie: () => ['__puus=NEW; Path=/; HttpOnly'],
+        get: () => null,
+      },
+      text: async () => JSON.stringify({ code: 0 }),
+    });
+    const r = await refreshQuarkCookieSession('__pus=PUS', fetcher);
+    expect(r).toEqual({
+      cookie: '__pus=PUS; __puus=NEW',
+      changed: true,
+      status: 200,
+      setCookieKeys: ['__puus'],
+    });
+    expect(fetcher).toHaveBeenCalledWith(expect.stringContaining('/1/clouddrive/member?'), expect.objectContaining({
+      method: 'GET',
+      headers: expect.objectContaining({ Cookie: '__pus=PUS' }),
+    }));
+  });
+
+  it('member 接口失败时保留原 cookie，不误写入半成品', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      status: 401,
+      headers: { getSetCookie: () => ['__puus=IGNORED'], get: () => null },
+      text: async () => JSON.stringify({ code: 401 }),
+    });
+    await expect(refreshQuarkCookieSession('__pus=PUS', fetcher)).resolves.toMatchObject({
+      cookie: '__pus=PUS', changed: false, status: 401, setCookieKeys: ['__puus'],
+    });
+  });
+});
 
 describe('quarkFileDelete 幂等清理', () => {
   it('明确已删除的 fid 可清队列，不重复删除其它文件', async () => {
