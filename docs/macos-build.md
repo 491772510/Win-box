@@ -155,6 +155,77 @@ pnpm install
 
 ---
 
+### 2.3 原生桥（ARM `.so`）—— 这只 jar **已随源码入库，mac 上不用做任何事**
+
+加固壳源（摸鱼 / fty / 嗷呜 / wex…）的 jar 里塞了 **Android ARM 机器码**（`.so`）。
+纯 Java 字节码能靠 dex2jar + 安卓桩搬到桌面 JVM 上跑，**机器码不行** —— 所以桌面版另有一条
+「原生桥」：在进程内用 unidbg **模拟** AArch64/ARM32 指令，并把 jar 里声明的 native 方法改写成
+转发实现。桥的 JVM 侧就是这一只 jar：
+
+```
+resources/jvm/native-bridge/native-bridge.jar     ← ★ 已入库（.gitignore 专门开了白名单）
+```
+
+**为什么把它入库**：它是**本项目自己的代码**（源码同目录 `com/winbox/nativebridge/*.java`），
+与 `resources/jvm/libs/`、`shell-shim/` 那些「逆向自第三方 app、不接受开源分发」的产物性质不同。
+而在入库之前，它的构建脚本只有 PowerShell 的 `build.ps1`（macOS 跑不了）、产物又不入库，于是：
+
+> mac 上从零 clone 的仓库里**根本没有这只 jar** → `JarSpiderBridge.nativeNeeded()` 第一件事就是
+> `existsSync(native-bridge.jar)`，见不到就**整条原生桥不启用**（连 unidbg 运行时不下载、日志一行不打）
+> → 含 `.so` 的壳源只能按无原生桥加载 → `UnsatisfiedLinkError` → 界面上报
+> **「该源依赖安卓原生库（.so），桌面版无法加载（架构限制，非移植缺陷）」**。
+
+⚠ 那句话对 mac 场景是**误导**：真正的原因是「桥没装」，不是「架构限制」。
+（unidbg 0.9.9 的运行时 jar 本身就带 macOS 二进制 —— `unicorn-1.0.15.jar` 内是
+`natives/osx_64|osx_arm64/libunicorn_java.dylib`，dynarmic / capstone / keystone / JNA 同理；
+桥的 Java 侧也是纯字节码、无平台分支。所以它从一开始就不是「物理不可能」，只是「没交付」。）
+
+**怎么确认它在工作**（日志里搜 `native-bridge`）：
+
+| 日志 | 含义 |
+| --- | --- |
+| `[native-bridge] 原生桥就绪：xxx.so (102440B, 64 位)，注册 native 8 个` | ✅ 正常 |
+| `[native-bridge] 原生桥改写产物复用（同 jar/.so）…` | ✅ 正常（复用上次产物，更快） |
+| `[native-bridge] 准备失败，按无原生桥降级: …` | ❌ 桥跑了但失败（看冒号后面的异常） |
+| `native: 该源含原生库(.so)，但**原生桥实现缺失**…` | ❌ jar 不见了（见下方重建） |
+| 全程没有 `native-bridge` 字样 | 该源不含 `.so`，本来就不需要桥 |
+
+**只有在改了 `com/**/*.java` 之后才需要重建**（产物才是运行时真正加载的东西）：
+
+```bash
+pnpm build:native-bridge
+# 等价于 node resources/jvm/native-bridge/build-native-bridge.mjs
+#   可选：--jdk <JDK目录>  --lib <unidbg运行时目录>  --out <别的输出路径>
+```
+
+需要两样东西，缺了脚本会**明确报错并告诉你从哪拿**（不会静默产出坏 jar）：
+
+- **JDK**（不是 JRE）—— `javac` / `jar` 只在 JDK 里：`brew install openjdk@17`
+  （脚本固定传 `--release 17`，产物 class 版本 61，与随包 JRE 对齐；用 JDK 21 构建也安全）
+- **unidbg 运行时 jar** —— 不入库，由应用按需下载。默认自动查找
+  `~/Library/Application Support/Win-Box/winbox-cache/native/unidbg-0.9.9`；
+  **先启动一次应用并导入任意含 `.so` 的加固壳源**就会出现，或用 `--lib` 指向别处的同名目录。
+
+> 打包把关：`pnpm dist:mac` 会先检查这只 jar 在不在，缺了**直接报错**并给出重建命令
+> （确需出一个「无原生桥」的降级包时才加 `--allow-no-bridge`）。
+>
+> 重建出来的 jar **字节上会和入库的那只不完全一样**（zip 内嵌时间戳；以及不同 javac 对
+> 单参数字符串拼接是否插 `String.valueOf` 的差异）—— 属语义等价的正常现象，
+> `git status` 里显示 jar 被改过**不是出错**。只有当类清单/方法签名变了才是真改动。
+
+> ⚠ **仍未实现**：非阻塞 TCP/socket 就绪（`CONTINUE.md` 列为「未验收」）。
+> `BridgeARM32Emulator.java` 里曾引用过一个**从未在任何提交里出现过**的 `SocketReadiness`，
+> 导致该文件自 `0c6bd45` 起**编译不过**（jar 不入库 → 这个断裂长期无人发现）。
+> 2026-10-14 已按**产物实测形态**还原（`javap` 逐类核对：37 个类清单一致、34 个字节码逐字节一致），
+> 使源码重新可构建。要续做非阻塞就绪请**新写** `SocketReadiness` 并把分支加回来，
+> 不要只补一个 `import` 了事。
+>
+> ⚠ **macOS 真机未验证**：unidbg 的 `.dylib` 能否被 `dlopen`（见 §10 的 **V9**）。
+> 若报 `Library not loaded` / `code signature invalid`，那是 Hardened Runtime 拦了未签名 dylib ——
+> 授权文件需要 `com.apple.security.cs.disable-library-validation`（见 §5）。
+
+---
+
 ## 3. 生成图标（只需做一次）
 
 macOS 用 `.icns`，这个文件**不入库**（`.gitignore` 已排除），在 Mac 上现生成：
@@ -416,6 +487,8 @@ xattr -cr /Applications/Win-Box.app
 | 配置 / 数据找不到了 | macOS 上数据在 `~/Library/Application Support/Win-Box`（**不在 `.app` 里**，也不在安装包目录） | 用「访达 → 前往文件夹」粘贴该路径 |
 | 签名后一运行就报签名失效 | 程序往 `.app` 内部写了文件（破坏了密封） | 属于代码缺陷，请提 Issue；临时办法是重新签名 |
 | Xcode CLT 报 `xcode-select: error: tool 'notarytool' requires Xcode` | Xcode 版本过老 | `sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install`；或装 Xcode 15+ |
+| 某个加固壳源报「该源依赖安卓原生库（.so），桌面版无法加载（架构限制，非移植缺陷）」 | **多半不是架构问题**：原生桥没生效（jar 缺失 / unidbg 运行时未下载 / dylib 被 Hardened Runtime 拦） | 搜日志里的 `native-bridge`：有「准备失败」看冒号后的异常；有「原生桥实现缺失」说明 jar 不在（见 §2.3 重建）；报 `Library not loaded` 则是 §5 的签名/授权问题 |
+| `pnpm dist:mac` 报 `缺少 resources/jvm/native-bridge/native-bridge.jar` | jar 被误删（它已入库） | `git checkout -- resources/jvm/native-bridge/native-bridge.jar`，或按 §2.3 重建；确要出降级包加 `--allow-no-bridge` |
 
 ---
 
@@ -433,6 +506,7 @@ xattr -cr /Applications/Win-Box.app
 | **V6** | JVM / Python 蜘蛛 | 导入一个 jar 蜘蛛和一个 py 蜘蛛，看能不能出搜索结果 | 不可用时应走「该源不可用」的人话降级，不应崩溃 |
 | **V7** | Gatekeeper / 公证 | 用一台**从未装过**的干净 Mac 双击 dmg | 见第 7、8 节 |
 | **V8** | `Cmd+W` / `Cmd+Q` / `Cmd+,` 快捷键 | 逐个按一遍 | `Cmd+,` 应跳到配置页 |
+| **V9** | **原生桥（unidbg）真的能在 mac 上跑起来** | 导入一个含 `.so` 的加固壳源（摸鱼 / fty / wex），搜日志里的 `native-bridge`：出现「原生桥就绪」= 通；出现「准备失败」= 看异常 | 若是 `Library not loaded` / `code signature invalid` → Hardened Runtime 拦了未签名 dylib，按 §5 的 `disable-library-validation` 重签；若报「原生桥实现缺失」→ 见 §2.3 |
 
 ---
 

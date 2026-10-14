@@ -129,7 +129,9 @@ public final class BridgeARM32Emulator extends AndroidARMEmulator {
             if (!(target instanceof CounterFile)) return -95; // EOPNOTSUPP
             PollFile poll = (PollFile) descriptor;
             poll.prune();
-            RegistrationKey key = new RegistrationKey(fd, target);
+            // 键取 CounterFile 的共享 State（dup 出的描述符共用同一计数器，见 CounterFile 注释）；
+            // 上一行的 `instanceof CounterFile` 守卫已保证这里的强转安全。
+            RegistrationKey key = new RegistrationKey(fd, ((CounterFile) target).state);
             Registration previous = poll.registrations.get(key);
             if (operation == 1 && previous != null) return -17; // EEXIST
             if (operation != 1 && previous == null) return -2; // ENOENT
@@ -138,7 +140,7 @@ public final class BridgeARM32Emulator extends AndroidARMEmulator {
             if (event == null) return -14;
             int mask = event.getInt(0);
             if ((mask & ~(1 | 4 | 8 | 16 | 0x40000000 | 0x80000000)) != 0) return -95;
-            poll.registrations.put(key, new Registration(target, mask, event.getLong(8)));
+            poll.registrations.put(key, new Registration((CounterFile) target, mask, event.getLong(8)));
             return 0;
         }
 
@@ -188,27 +190,40 @@ public final class BridgeARM32Emulator extends AndroidARMEmulator {
             throw new ThreadContextSwitchException().setReturnValue(0);
         }
 
+        /**
+         * epoll 注册项。**只支持 eventfd（CounterFile）这一种源**——
+         * `kernelEpollControl` 对非 CounterFile 直接返回 -95(EOPNOTSUPP)，所以这里可以安全地
+         * 用具体类型而不是 AndroidFileIO。
+         *
+         * ★★ 2026-10-14（macOS 适配时修复「源码编译不过」，勿再随手改回去）★★
+         *   本类原先是 `AndroidFileIO file` + 一段 `file instanceof TcpSocket && SocketReadiness.*`
+         *   的三元分支（见 0c6bd45）。那是一次**未完成的非阻塞 TCP 就绪**改造 ——
+         *     · unidbg 侧确有 `com.github.unidbg.linux.file.TcpSocket`（当时只是漏了 import）；
+         *     · 但 `SocketReadiness` **从未在任何提交里存在过**，仓库全历史 `git log -S` 搜不到；
+         *   于是 `BridgeARM32Emulator.java` 自 0c6bd45 起**根本无法编译**。
+         *   而 `resources/jvm/native-bridge/native-bridge.jar` 一直被 gitignore、只能构建产出，
+         *   所以这个断裂长期没有任何提示 —— 后果是「桥无法从源码重建」，macOS 上尤其致命
+         *   （原先只有 PowerShell 的 build.ps1）。
+         *   现按**产物里真实的形态**还原（javap 实测：`Registration.file` 是 CounterFile，
+         *   构造签名 `(CounterFile,int,long)`，`ready()` 无任何 TcpSocket 分支），
+         *   使源码与随包 jar 语义一致、可重建。
+         *   ⚠ 非阻塞 TCP 就绪仍未实现（CONTINUE.md 明确列为「未验收」）；
+         *     要续做请新写 `SocketReadiness` 并在此恢复分支，不要只加 import 了事。
+         */
         private static final class Registration {
-            final AndroidFileIO file;
+            final CounterFile file;
             final int mask;
             final long data;
             long readEpoch = -1, writeEpoch = -1;
             boolean disabled;
-            Registration(AndroidFileIO file, int mask, long data) { this.file = file; this.mask = mask; this.data = data; }
+            Registration(CounterFile file, int mask, long data) { this.file = file; this.mask = mask; this.data = data; }
             int ready() {
                 if (disabled) return 0;
                 boolean edge = (mask & 0x80000000) != 0;
                 int bits = 0;
-                boolean readable = file instanceof CounterFile
-                        ? ((CounterFile) file).canRead()
-                        : file instanceof TcpSocket && SocketReadiness.readable((TcpSocket) file);
-                boolean writable = file instanceof CounterFile
-                        ? ((CounterFile) file).state.value != CounterFile.MAX
-                        : file instanceof TcpSocket && SocketReadiness.writable((TcpSocket) file);
-                long readNow = file instanceof CounterFile ? ((CounterFile) file).state.readEpoch : SocketReadiness.epoch((TcpSocket) file, true);
-                long writeNow = file instanceof CounterFile ? ((CounterFile) file).state.writeEpoch : SocketReadiness.epoch((TcpSocket) file, false);
-                if ((mask & 1) != 0 && readable && (!edge || readEpoch != readNow)) bits |= 1;
-                if ((mask & 4) != 0 && writable && (!edge || writeEpoch != writeNow)) bits |= 4;
+                // level-triggered 恒报；edge-triggered 只在 epoch 前进后报一次（epoch 由 CounterFile 维护）
+                if ((mask & 1) != 0 && file.canRead() && (!edge || readEpoch != file.state.readEpoch)) bits |= 1;
+                if ((mask & 4) != 0 && file.state.value != CounterFile.MAX && (!edge || writeEpoch != file.state.writeEpoch)) bits |= 4;
                 return bits;
             }
         }

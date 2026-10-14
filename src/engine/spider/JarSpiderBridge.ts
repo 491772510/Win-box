@@ -271,6 +271,8 @@ export class JarSpiderBridge {
   private readonly pyRuntimeDir?: string;
   /** ★ ARM 原生桥运行时目录（见 JarBridgeOptions.nativeRuntimeDir） */
   private readonly nativeRuntimeDir?: string;
+  /** ★ 2026-10-14：「原生桥 jar 缺失」只告警一次（见 nativeNeeded） */
+  private nativeBridgeMissingWarned = false;
   /** ★ 网络代理注入点（宿主提供；空 = 不走代理） */
   private readonly proxyProvider?: () => { jvmArgs: string[]; env: Record<string, string> };
   /** ★ 机器总内存（dex2jar 堆上限的收口依据；见 d2jHeapMb） */
@@ -1942,8 +1944,31 @@ export class JarSpiderBridge {
    */
   private nativeNeeded(jarPaths: string[]): boolean {
     if (!this.nativeRuntimeDir) return false;
-    if (!existsSync(join(this.jvmDir, 'native-bridge', 'native-bridge.jar'))) return false;
+    const bridgeJar = join(this.jvmDir, 'native-bridge', 'native-bridge.jar');
+    if (!existsSync(bridgeJar)) {
+      // ★ 2026-10-14：这一行是「macOS 上加固壳源全灭」最隐蔽的一环 —— 桥 jar 不在就静默 return false，
+      //   连一行日志都没有。于是用户只能看到 translateSpiderLog 把 UnsatisfiedLinkError 翻成的
+      //   「该源依赖安卓原生库（.so），桌面版无法加载（架构限制，非移植缺陷）」，
+      //   完全看不出「其实是原生桥没装」（mac 上从零 clone 的仓库正是这种情况：
+      //   jar 原先不入库，唯一构建脚本是 PowerShell 的 build.ps1）。
+      //   故在「该 jar 确实需要原生」时补一条 warn，把「缺桥」与「真 ABI 不匹配」区分开。
+      //   仅在确需原生时才探测（jarNeedsNative 有缓存；普通源一个字节都不多打）。
+      if (jarPaths.some((p) => this.jarNeedsNative(p))) this.warnNativeBridgeMissing(bridgeJar);
+      return false;
+    }
     return jarPaths.some((p) => this.jarNeedsNative(p));
+  }
+
+  /** 「缺原生桥」只告警一次（一个会话里这类源可能上百个，逐次刷屏会淹没真正的原因）。 */
+  private warnNativeBridgeMissing(bridgeJar: string): void {
+    if (this.nativeBridgeMissingWarned) return;
+    this.nativeBridgeMissingWarned = true;
+    this.host?.logger.w(
+      'native: 该源含原生库(.so)，但**原生桥实现缺失**（未启用 ARM 模拟），只能按无原生桥加载 —— '
+      + '随后会报「依赖安卓原生库(.so)，桌面版无法加载」；这不是源的问题，也不是架构限制。\n'
+      + `  缺少: ${bridgeJar}\n`
+      + '  该 jar 已随源码入库；若确实缺失，用 `node resources/jvm/native-bridge/build-native-bridge.mjs` 重建（见 docs/macos-build.md）。',
+    );
   }
 
   /** 原生桥注入的 JVM 参数：工作目录（.so/rootfs）与改写产物目录，运行器据此启用桥 */

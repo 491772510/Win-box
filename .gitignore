@@ -61,6 +61,14 @@ resources/jvm/jre/
 resources/jvm/dex2jar/
 resources/jvm/**/*.jar
 resources/jvm/*.jar
+# ★ 例外：native-bridge.jar 是**本项目自己的代码**（源码 com/winbox/nativebridge/*.java 就在仓库里），
+#   不是上面那些「逆向自第三方 app、不接受开源分发」的产物 → 允许入库。
+#   为什么必须入库：它的构建脚本原先只有 PowerShell 的 build.ps1（macOS 上跑不了），
+#   不入库 ⇒ 从零 clone 的 mac 仓库里根本没有这只 jar ⇒ 原生桥整体不启用 ⇒
+#   所有含 .so 的加固壳源在 mac 上只能报「该源依赖安卓原生库（.so），桌面版无法加载」。
+#   改了 com/**/*.java 必须重跑 resources/jvm/native-bridge/build-native-bridge.mjs 并一并提交。
+#   详见 docs/macos-build.md「原生桥（ARM .so）」一节。
+!resources/jvm/native-bridge/native-bridge.jar
 
 # --- 内部交付文档（含产物 SHA / 版本节奏等） ---
 docs/交付说明.md

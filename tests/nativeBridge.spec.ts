@@ -32,17 +32,28 @@ function classpathOf(argv: string[]): string {
 }
 
 /** 造临时 jvmDir（含 java.exe / libs / stubs / native-bridge.jar 桩）与原生运行时目录 */
-function makeBridge(opts: { nativeRuntimeDir?: string }): { bridge: JarSpiderBridge; dir: string } {
+function makeBridge(opts: { nativeRuntimeDir?: string; omitBridgeJar?: boolean; logs?: string[] }): { bridge: JarSpiderBridge; dir: string } {
   const dir = join(tmpdir(), `tvm-native-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
   mkdirSync(join(dir, 'jre', 'bin'), { recursive: true });
   writeFileSync(join(dir, 'jre', 'bin', 'java.exe'), 'stub');
   mkdirSync(join(dir, 'libs'), { recursive: true });
   mkdirSync(join(dir, 'stubs'), { recursive: true });
   mkdirSync(join(dir, 'native-bridge'), { recursive: true });
-  writeFileSync(join(dir, 'native-bridge', 'native-bridge.jar'), 'stub-bridge');
+  if (!opts.omitBridgeJar) writeFileSync(join(dir, 'native-bridge', 'native-bridge.jar'), 'stub-bridge');
   const bridge = new JarSpiderBridge(
     { jvmDir: dir, cacheDir: join(dir, 'cache'), nativeRuntimeDir: opts.nativeRuntimeDir },
-    { http: {}, kv: {}, logger: NullLogger } as never,
+    {
+      http: {},
+      kv: {},
+      logger: opts.logs
+        ? {
+          i: (m: string) => opts.logs!.push(m),
+          w: (m: string) => opts.logs!.push(m),
+          e: () => undefined,
+          d: () => undefined,
+        }
+        : NullLogger,
+    } as never,
   );
   return { bridge, dir };
 }
@@ -157,6 +168,80 @@ describe('JarSpiderBridge.call — ARM 原生桥接入', () => {
     const argv = spawnMock.mock.calls[0][1] as string[];
     expect(argv).toContain(`-Dtvbox.native.work=${join(rt, 'work')}`);
     expect(classpathOf(argv)).toContain('native-bridge.jar');
+  });
+});
+
+// ── ★ 2026-10-14：缺原生桥 jar 时不再「静默退化」 ──
+//   背景：`nativeNeeded()` 原先见不到 native-bridge.jar 就静默 return false，一行日志都不打。
+//   mac 上从零 clone 的仓库正是这个状态（jar 不入库 + 唯一构建脚本是 PowerShell 的 build.ps1），
+//   用户看到的是 translateSpiderLog 把 UnsatisfiedLinkError 翻成的
+//   「该源依赖安卓原生库（.so），桌面版无法加载（架构限制，非移植缺陷）」—— 误导为「AI/架构问题」。
+describe('JarSpiderBridge.call — 原生桥 jar 缺失必须可见', () => {
+  let dirs: string[] = [];
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => fakeChild());
+  });
+  afterEach(() => {
+    for (const d of dirs) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    dirs = [];
+  });
+
+  it('jar 含 .so 但缺 native-bridge.jar → 不注入参数，并给出可定位的 warn（只打一次）', async () => {
+    const rt = join(tmpdir(), `tvm-native-rt-missing-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(rt, { recursive: true });
+    dirs.push(rt);
+    seedNativeRuntime(rt);
+    const logs: string[] = [];
+    const { bridge, dir } = makeBridge({ nativeRuntimeDir: rt, omitBridgeJar: true, logs });
+    dirs.push(dir);
+    const jar = join(dir, 'guard.jar');
+    writeFileSync(jar, buildZip([{ name: 'assets/FishGuard-v8.so', bytes: Buffer.from([0x7f, 0x45, 0x4c, 0x46]) }]));
+
+    const p1 = bridge.call([jar], 'X', 'm', []);
+    const c1 = spawnMock.mock.results[0].value as ReturnType<typeof fakeChild>;
+    c1.emit('close', 0);
+    await p1;
+
+    // 行为不变：无桥就不注入任何原生参数（与「配置了目录但缺 jar」历史行为一致）
+    const argv = spawnMock.mock.calls[0][1] as string[];
+    expect(argv.some((a) => a.startsWith('-Dtvbox.native.'))).toBe(false);
+    expect(classpathOf(argv)).not.toContain('native-bridge.jar');
+
+    // 但必须留下可行动的线索
+    const warns = logs.filter((m) => m.includes('原生桥实现缺失'));
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('build-native-bridge.mjs');       // 给出重建命令
+    expect(warns[0]).toContain('不是源的问题，也不是架构限制');   // 与 translateSpiderLog 的误导文案明确切割
+
+    // 第二个同类源不重复刷屏
+    const p2 = bridge.call([jar], 'X', 'm', []);
+    const c2 = spawnMock.mock.results[1].value as ReturnType<typeof fakeChild>;
+    c2.emit('close', 0);
+    await p2;
+    expect(logs.filter((m) => m.includes('原生桥实现缺失'))).toHaveLength(1);
+  });
+
+  it('普通源（无 .so / 无 native 方法）缺桥 → 不告警（不误报）', async () => {
+    const rt = join(tmpdir(), `tvm-native-rt-missing2-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(rt, { recursive: true });
+    dirs.push(rt);
+    seedNativeRuntime(rt);
+    const logs: string[] = [];
+    const { bridge, dir } = makeBridge({ nativeRuntimeDir: rt, omitBridgeJar: true, logs });
+    dirs.push(dir);
+    const jar = join(dir, 'plain.jar');
+    writeFileSync(jar, buildZip([{ name: 'classes.dex', bytes: Buffer.from('x') }]));
+
+    const p = bridge.call([jar], 'X', 'm', []);
+    const c = spawnMock.mock.results[0].value as ReturnType<typeof fakeChild>;
+    c.emit('close', 0);
+    await p;
+
+    expect(logs.filter((m) => m.includes('原生桥实现缺失'))).toHaveLength(0);
   });
 });
 

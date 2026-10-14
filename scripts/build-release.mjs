@@ -13,10 +13,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 //   --win  → 与原脚本完全一致的 `--win nsis`
 //   无参数  → 默认 Windows（★ 零回归红线：默认分支的行为一字不改）
 const argv = process.argv.slice(2).filter(a => a !== '--');
-const unknown = argv.filter(a => !['--mac', '--win', '--dry-run', '--allow-placeholder'].includes(a));
+const unknown = argv.filter(a => !['--mac', '--win', '--dry-run', '--allow-placeholder', '--allow-no-bridge'].includes(a));
 if (unknown.length) {
   console.error(`Unknown argument(s): ${unknown.join(' ')}`);
-  console.error('Usage: node scripts/build-release.mjs [--win | --mac] [--dry-run] [--allow-placeholder]');
+  console.error('Usage: node scripts/build-release.mjs [--win | --mac] [--dry-run] [--allow-placeholder] [--allow-no-bridge]');
   process.exit(1);
 }
 // ★ 2026-10-13（用户要求）：本机没有私有原图（赞助码 / 加群二维码）时，允许用仓库自带的
@@ -97,6 +97,24 @@ function verifyPackaged(pick, label) {
   if (!packaged) throw new Error(`Built renderer does not contain the original ${label}. Packaging stopped.`);
   console.log(`${label} verified: ${packaged} / SHA256 ${original}`);
 }
+// ★ 2026-10-14：原生桥 jar 必须随包 —— 缺了它，**所有含 .so 的加固壳源**在桌面上只能报
+//   「该源依赖安卓原生库（.so），桌面版无法加载（架构限制，非移植缺陷）」（见 JarSpiderBridge
+//   的 translateSpiderLog）。而这只 jar 曾经不入库，加上唯一的构建脚本 build.ps1 是 PowerShell，
+//   mac 上从零 clone 的仓库里就根本没有它 —— 这是 mac 适配里最隐蔽的一处缺口。
+//   Windows 主开发机历史上一直有它（本地构建产物），所以只在 mac 分支强制把关；
+//   确需出一个「无原生桥」的降级包时用 --allow-no-bridge 显式放行。
+if (target === 'mac' && !argv.includes('--allow-no-bridge')) {
+  const bridge = join(root, 'resources/jvm/native-bridge/native-bridge.jar');
+  if (!existsSync(bridge)) {
+    console.error('缺少 resources/jvm/native-bridge/native-bridge.jar —— 缺了它，含 .so 的加固壳源在 macOS 上全部不可用（报「依赖安卓原生库」）。');
+    console.error('  · 正常情况下该 jar 已随源码入库，先 git status 确认是不是被误删；');
+    console.error('  · 需要重建时：node resources/jvm/native-bridge/build-native-bridge.mjs（或 pnpm build:native-bridge）');
+    console.error('  · 确实要出「无原生桥」的降级包：加 --allow-no-bridge');
+    process.exit(1);
+  }
+  console.log(`native bridge verified: ${bridge}`);
+}
+
 verifyPackaged(support, 'Support artwork');
 verifyPackaged(group, 'Group QR artwork');
 
