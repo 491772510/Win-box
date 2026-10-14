@@ -36,10 +36,16 @@ const api = {
     importPyLocal: () => invoke<{ ok: boolean; key?: string; error?: string }>(IPC.CFG_IMPORT_PY_LOCAL),
     /**
      * ★ 2026-09-30（用户要求）：导入**本地 TXT / M3U 直播源**（配置页按钮）。
-     * 返回命中的线路名与下标；replaced = 同文件重复导入（更新名字，不新增线路）。
+     * ★ 2026-10-14：改为**两步导入**（对齐本地包命名流程）——
+     *   首次调用（不传 path）：选文件 + 校验 + 落盘，返回 `{ needsName:true, path, name }`；
+     *   二次调用（传 path + name）：以用户命名登记线路，返回命中下标。
      */
-    importLiveLocal: () =>
-      invoke<{ ok: boolean; name?: string; index?: number; replaced?: boolean; total?: number; error?: string }>(IPC.CFG_IMPORT_LIVE_LOCAL),
+    importLiveLocal: (args?: { name?: string; path?: string }) =>
+      invoke<{ ok: boolean; needsName?: boolean; path?: string; name?: string; index?: number; replaced?: boolean; total?: number; error?: string }>(IPC.CFG_IMPORT_LIVE_LOCAL, args),
+    /** ★ 2026-10-14（用户要求）：删除某条直播线路（下标） */
+    deleteLive: (index: number) => invoke<void>(IPC.CFG_DELETE_LIVE, index),
+    /** ★ 2026-10-14（用户要求）：重命名某条直播线路 */
+    updateLive: (a: { index: number; name: string }) => invoke<void>(IPC.CFG_UPDATE_LIVE, a),
     /**
      * ★ 2026-09-29（用户要求）：导入**本地包**（含 影视.json 与 py/js/jar/html 等子目录的目录包）。
      * 选目录 → 登记包根 → 包内相对引用展开 → 走正常订阅导入（档案 apiUrl 记 pkg://<i>/<rel>）。

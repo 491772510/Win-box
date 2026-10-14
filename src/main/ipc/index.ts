@@ -58,6 +58,32 @@ function winOf(e: IpcMainInvokeEvent): BrowserWindow | null {
 /** ★ 本次主进程启动的会话标识（模块求值 = 应用启动一次；重启必变） */
 const SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
+/**
+ * ★ 2026-10-14（用户要求）：本地 TXT / M3U 直播源「读 → 形态校验 → 归一化 UTF-8 落盘」的共用步骤。
+ * 返回 `needsName=true` 表示调用方尚未给出线路名（交由渲染层「单独弹框命名」后二次调用）。
+ * 抛错 = 文件为空 / 编码可疑 / 内容不像直播源。
+ */
+function importLiveFile(srcPath: string, nameOverride: string): { fileName: string; name: string; needsName: boolean } {
+  const buf = readFileSync(srcPath);
+  if (!buf.length) throw new Error('所选文件为空');
+  // 编码：UTF-8 优先；出现替换字符（典型 GBK 直播源）时按 gb18030 再解一次做校验
+  let text = buf.toString('utf-8');
+  if (text.includes('\uFFFD')) {
+    try { text = iconv.decode(buf, 'gb18030'); } catch { /* 解码失败就用 utf-8 结果做校验 */ }
+  }
+  if (!looksLikeLiveSourceText(text)) {
+    throw new Error('文件内容不像 TXT / M3U 直播源（需要 #EXTM3U 头、#genre# 分组行，或「频道名,http…」频道行）');
+  }
+  const dir = join(userDataDir(), 'local-live');
+  mkdirSync(dir, { recursive: true });
+  const fileName = sanitizeLiveFileName(basename(srcPath));
+  // 归一化为 UTF-8 落盘（/file 路由固定按 text/plain; charset=utf-8 输出，
+  // 若存原始 GBK 字节会在直播页解码成乱码；文本在上一段已统一解码）
+  writeFileSync(join(dir, fileName), Buffer.from(text, 'utf-8'));
+  const name = nameOverride || nameFromLocalFile(srcPath); // 线路名 = 用户命名（缺省取原始文件名去扩展名）
+  return { fileName, name, needsName: !nameOverride };
+}
+
 export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService, updater: UpdateService, pkgs: LocalPkgStore): void {
   const log = fileLogger;
   /** ★ 2026-10-08 MPV 播放内核（单会话；播放器窗口关闭/退出应用会 dispose） */
@@ -432,50 +458,44 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
 
   /**
    * ★ 2026-09-30（用户要求）：导入**本地 TXT / M3U 直播源**（配置页按钮）。
-   *
-   * 链路：选文件 → 形态校验（#EXTM3U / #genre# / 「频道,http…」至少其一）→ 原始字节落
-   *   `<userData>/local-live/<文件名>`（就地更新，同名覆盖）→ 追加/更新一条 lives 线路
-   *   （url = `http://127.0.0.1:9978/file/local-live/<文件名>`，走既有的 /file 路由 + 直播页加载链）。
+   * ★ 2026-10-14（用户要求）：改为**两步导入**（对齐本地包命名流程）——
+   *   首次（不带 path）：选文件 → 形态校验（#EXTM3U / #genre# / 「频道,http…」至少其一）→
+   *     原始字节归一化为 UTF-8 落 `<userData>/local-live/<文件名>`（就地更新，同名覆盖）→
+   *     返回 `{ needsName:true, path, name:<原文件名> }`，由渲染层弹框命名；
+   *   二次（带 path + name）：以用户命名登记/更新一条 lives 线路
+   *   （url = `http://127.0.0.1:9978/file/local-live/<文件名>`，走既有 /file 路由 + 直播页加载链）。
    */
-  registerHandler(IPC.CFG_IMPORT_LIVE_LOCAL, async (e: any): Promise<{
-    ok: boolean; name?: string; index?: number; replaced?: boolean; total?: number; error?: string;
+  registerHandler(IPC.CFG_IMPORT_LIVE_LOCAL, async (e: any, args?: { name?: string; path?: string }): Promise<{
+    ok: boolean; needsName?: boolean; path?: string; name?: string; index?: number; replaced?: boolean; total?: number; error?: string;
   }> => {
     const win = winOf(e);
-    const picked = await dialog.showOpenDialog(win ?? undefined!, {
-      properties: ['openFile'],
-      filters: [{ name: '直播源（TXT / M3U）', extensions: ['txt', 'm3u', 'm3u8'] }],
-    });
-    if (picked.canceled || !picked.filePaths?.[0]) return { ok: false }; // 用户取消，不视为错误
-    const srcPath = picked.filePaths[0];
+    const arg = args || {};
+    let srcPath = String(arg.path || '').trim();
+    // ---- 第一步：选文件 + 校验 + 归一化落盘（未带 name → 返回 needsName，由渲染层弹框命名） ----
+    if (!srcPath) {
+      const picked = await dialog.showOpenDialog(win ?? undefined!, {
+        properties: ['openFile'],
+        filters: [{ name: '直播源（TXT / M3U）', extensions: ['txt', 'm3u', 'm3u8'] }],
+      });
+      if (picked.canceled || !picked.filePaths?.[0]) return { ok: false }; // 用户取消，不视为错误
+      srcPath = picked.filePaths[0];
+    }
     try {
-      const buf = readFileSync(srcPath);
-      if (!buf.length) return { ok: false, error: '所选文件为空' };
-      // 编码：UTF-8 优先；出现替换字符（典型 GBK 直播源）时按 gb18030 再解一次做校验
-      let text = buf.toString('utf-8');
-      if (text.includes('\uFFFD')) {
-        try {
-          text = iconv.decode(buf, 'gb18030');
-        } catch {
-          /* 解码失败就用 utf-8 结果做校验 */
-        }
-      }
-      if (!looksLikeLiveSourceText(text)) {
-        return { ok: false, error: '文件内容不像 TXT / M3U 直播源（需要 #EXTM3U 头、#genre# 分组行，或「频道名,http…」频道行）' };
-      }
-      const dir = join(userDataDir(), 'local-live');
-      mkdirSync(dir, { recursive: true });
-      const fileName = sanitizeLiveFileName(basename(srcPath));
-      // 归一化为 UTF-8 落盘（/file 路由固定按 text/plain; charset=utf-8 输出，
-      // 若存原始 GBK 字节会在直播页解码成乱码；文本在上一段已统一解码）
-      writeFileSync(join(dir, fileName), Buffer.from(text, 'utf-8'));
-      const name = nameFromLocalFile(srcPath); // 线路名 = 原始文件名（去扩展名）
-      const bean: LiveBean = parseLive({ name, api: '', type: '0', url: localLiveUrl(LOCAL_PROXY_BASE, fileName) }, 0);
-      const r = host.cfgAddLive(bean);
-      return { ok: true, name, index: r.index, replaced: r.replaced, total: host.lives.length };
+      const r = importLiveFile(srcPath, String(arg.name || '').trim());
+      // 首次导入且用户未命名 → 交由渲染层「单独弹框命名」（对齐本地包流程）
+      if (r.needsName) return { ok: true, needsName: true, path: srcPath, name: r.name };
+      const bean: LiveBean = parseLive({ name: r.name, api: '', type: '0', url: localLiveUrl(LOCAL_PROXY_BASE, r.fileName) }, 0);
+      const added = host.cfgAddLive(bean);
+      return { ok: true, name: r.name, index: added.index, replaced: added.replaced, total: host.lives.length };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   }, log);
+
+  /** ★ 2026-10-14（用户要求）：删除某条直播线路（配置页直播线路列表） */
+  registerHandler(IPC.CFG_DELETE_LIVE, (_e: any, index: number) => host.cfgDeleteLive(Number(index)), log);
+  /** ★ 2026-10-14（用户要求）：重命名某条直播线路（导入后允许编辑名称） */
+  registerHandler(IPC.CFG_UPDATE_LIVE, (_e: any, a: { index: number; name: string }) => host.cfgUpdateLiveName(Number(a?.index), String(a?.name ?? '')), log);
 
   // ★ 2026-09-29（用户要求）本地包「网页源」：点播页「网页」入口 → 独立窗口打开 homePage（preload 注入 window.fm）
   registerHandler(IPC.WEBHOME_OPEN, (_e: any, init: WebHomeOpenInit) => openWebHomeWindow(init || { url: '' }), log);

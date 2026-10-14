@@ -26,6 +26,13 @@ import { ensureJailDrive, jailSpawnCwd, releaseJailDrive, JAIL_DIR_NAME } from '
 import { buildZip, listZipEntries, looksLikeZip, readZipEntries, zipEntrySizes, type ZipEntryData } from '../util/syncZip';
 import { SpiderProcPool, poolEnabled, servePoolKey, WARM_METHOD, type PoolResult } from './SpiderProcPool';
 import { fixSelfSuperCallsInJarFile } from './classFix';
+// ★ 2026-10-14：补全蜘蛛 jar 自带的极简 com.github.catvod.spider.Proxy（补 getProxyUrlDo）——
+//   否则该类调用必 NoSuchMethodError（安卓端由 App dex 的同名完整类兜住，桌面端没有）。
+import { patchSpiderProxyInJarFile } from './appProxyStub';
+// ★ 2026-10-14：部分蜘蛛按 **okhttp 4.x** 参数序调用 `RequestBody.create`，桌面端只有 3.14.9 ⇒
+//   必 NoSuchMethodError。修法 = 把「补了 4.x 重载的 RequestBody」打成小 jar 排在 -cp 最前
+//   （父加载器先命中者生效，覆盖一切来源的调用者，含 Java 侧 runtime-dex 产物；见 okhttp4Compat.ts）。
+import { OKHTTP4_COMPAT_JAR } from './okhttp4Compat';
 import { hasNativeMethods } from './nativeClass';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 
@@ -37,8 +44,10 @@ import { LOCAL_PROXY_BASE } from '../../shared/constants';
  * - v3：修补「super 调用被转成自递归 invokespecial」（classFix.ts）—— 旧产物里这些类
  *       一调用就 StackOverflowError（整族盘搜蜘蛛受影响），必须作废重转才生效
  * - v4：普通 JAR 也执行 DexJarRepair，恢复被 dex2jar 误译的 NEW 类型及缺失构造器
+ * - v5：补全 jar 自带的极简 `com.github.catvod.spider.Proxy`（补 `getProxyUrlDo`；见 appProxyStub.ts）
+ *       —— 旧产物里该类调用必 NoSuchMethodError，必须作废重转才生效
  */
-export const CONVERTED_CACHE_VERSION = 4;
+export const CONVERTED_CACHE_VERSION = 5;
 
 export interface JarBridgeOptions {
   /** resources/jvm 目录（含 jre/d2j/stubs/libs） */
@@ -447,8 +456,22 @@ export class JarSpiderBridge {
     return p;
   }
 
+  /**
+   * 父加载器 classpath 组成：**stubs.jar → okhttp4 兼容 jar → libs/*.jar**（顺序即优先级）。
+   *
+   * ★ 2026-10-14：兼容 jar **必须排在 libs 之前** —— 它只影子 `okhttp3/RequestBody`
+   *   （= 3.14.9 原类 + 追加的 okhttp 4.x 参数序 `create` 重载，见 okhttp4Compat.ts）。
+   *   父 cp 先命中者生效，排最前才能盖住 libs 里的原版；而问题调用发生在 **Java 侧
+   *   runtime-dex 产物**里（Node 端改写 jar 够不到），只有「给宿主类补方法」这一条路能全覆盖。
+   *   兼容 jar 由 `scripts/gen-okhttp-compat.mjs` 生成并入库；缺失时静默退回原版行为。
+   */
   private classpathJars(): string {
-    return [join(this.jvmDir, 'stubs', 'stubs.jar'), ...this.libJars()].join(';');
+    const fs = require('node:fs') as typeof import('node:fs');
+    const parts = [join(this.jvmDir, 'stubs', 'stubs.jar')];
+    const compat = join(this.jvmDir, 'okhttp4-compat', OKHTTP4_COMPAT_JAR);
+    if (fs.existsSync(compat)) parts.push(compat);
+    parts.push(...this.libJars());
+    return parts.join(';');
   }
 
   private libJars(): string[] {
@@ -984,6 +1007,13 @@ export class JarSpiderBridge {
     //   实测影响整族盘搜蜘蛛（sun.json 的 Pan/MiPan/PanSou/Baiku/KuLe/… 全部 init 就崩），
     //   见 classFix.ts 文件头。属于增强步骤：失败只记日志，不让「能用的产物」变成失败。
     fixSelfSuperCallsInJarFile(part, [join(this.jvmDir, 'stubs', 'stubs.jar'), ...this.libJars()], {
+      i: (m) => this.host?.logger.i(m),
+      w: (m) => this.host?.logger.w(m),
+    });
+    // ★ 2026-10-14：补全 jar 自带的极简 `com.github.catvod.spider.Proxy`（补 `getProxyUrlDo`）——
+    //   安卓端靠 App dex 的同名完整类兜住，桌面端没有 ⇒ 该类调用必 NoSuchMethodError（见 appProxyStub.ts）。
+    //   同样属于增强步骤：失败只记日志，不让「能用的产物」变成失败。
+    patchSpiderProxyInJarFile(part, {
       i: (m) => this.host?.logger.i(m),
       w: (m) => this.host?.logger.w(m),
     });

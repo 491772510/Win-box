@@ -2,10 +2,22 @@
 import { build, context } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+// ★ 2026-10-14：okhttp 4.x 兼容 jar（`resources/jvm/okhttp4-compat/winbox-okhttp4-compat.jar`）是
+//   **派生生成物**且 `resources/jvm/**/*.jar` 不进仓库 ⇒ 随构建现场产出，否则打包后该 jar 缺失、
+//   蜘蛛里 okhttp 4.x 参数序的 `RequestBody.create(String, MediaType)` 调用会退回 NoSuchMethodError。
+//   上游 jar 未 provision 时静默跳过（不阻断构建）。
+import { generateOkHttp4Compat } from './gen-okhttp-compat.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const src = resolve(root, '..');
 const watch = process.argv.includes('--watch');
+
+try {
+  const r = await generateOkHttp4Compat();
+  console.log(r ? `[okhttp4-compat] 已生成（追加 ${r.added} 个重载）` : '[okhttp4-compat] 跳过（上游 okhttp-3.14.9.jar 不存在）');
+} catch (e) {
+  console.warn(`[okhttp4-compat] 生成失败（不阻断构建）: ${(e && e.message) || e}`);
+}
 
 const opts = {
   bundle: true,

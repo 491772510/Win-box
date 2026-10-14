@@ -180,6 +180,26 @@ export function driveBindHintFromPlaySources(
 }
 
 /**
+ * ★ 2026-10-14（用户日志 `app-2026-10-13.log`）：把 `driveBindHintFromPlaySources` 的命中词归一为
+ * **provider 键**（`quark`/`baidu`/`uc`/`115`/`ali`）。
+ *
+ * <p>命中词形态不统一：多数是中文标签（`夸克`/`百度`/`115`），也可能已是 URL 匹配出的键（`quark`）；
+ * 泛化词（`网盘`）无法判定归属 → 返回 null。
+ * <p>用途：`SpiderHost` 记住「该源用哪个网盘」，以便蜘蛛返回**不含网盘名**的泛化授权文案
+ * （实测 `请先完成网盘授权`）时补位，走既有的「已绑定 → 重置蜘蛛池重试一次」自愈分支。
+ */
+export function driveProviderKeyFromHint(hint?: string | null): string | null {
+  const h = (hint || '').trim().toLowerCase();
+  if (!h) return null;
+  if (/quark|夸克/.test(h)) return 'quark';
+  if (/baidu|百度/.test(h)) return 'baidu';
+  if (/^uc$|uc盘|drive\.uc/.test(h)) return 'uc';
+  if (/115/.test(h)) return '115';
+  if (/ali|阿里/.test(h)) return 'ali';
+  return null;
+}
+
+/**
  * 详情「播放源名」里的网盘关键词表（宁窄勿宽：只收录真的代表云盘播放的字样）。
  * 实测命中：`夸克原画` / `夸克最高急速`（wex 玩偶，用户报的那只源）。
  */
@@ -200,7 +220,8 @@ export function looksLikeDriveBindFailure(message?: string | null): boolean {
   // 实测形态：网盘接口在无 Cookie 时回包缺 data 字段（带引号/不带引号两种写法都见过）
   if (m.includes('jsonobject["data"] not found') || m.includes('jsonobject[data] not found')) return true;
   // 授权类关键词 + 网盘语境 → 也算（避免把普通 CMS 的解析错误误判成网盘问题）
-  if (/(cookie|token|authorization|未登录|登录|扫码)/.test(m) && /(网盘|drive|quark|uc盘|ali|115|pan)/.test(m)) return true;
+  // ★ 2026-10-14：补 `授权` —— 部分蜘蛛用**泛化**文案「请先完成网盘授权」（不含网盘名），旧正则漏判。
+  if (/(cookie|token|authorization|授权|未登录|登录|扫码)/.test(m) && /(网盘|drive|quark|uc盘|ali|115|pan)/.test(m)) return true;
   // ★ 2026-09-28：中文网盘名也要算语境 —— 实测百度系蜘蛛的提示是
   //   `还未登录百度账号,请前往【配置中心】登录`，旧正则里没有「百度」→ 漏判。
   return driveBindProviderFromText(message) !== null;

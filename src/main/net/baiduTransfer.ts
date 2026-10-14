@@ -37,6 +37,7 @@
 import type { Logger } from '../../shared/types';
 import { createHash, randomUUID } from 'node:crypto';
 import { mergeSetCookies } from './cookieMerge';
+import { parseDriveDescriptor, descriptorField } from './driveDescriptor';
 
 const REF = 'https://pan.baidu.com/';
 const REF_DISK = 'https://pan.baidu.com/disk/main';
@@ -81,6 +82,20 @@ export interface BaiduSharedFile {
 }
 
 export function extractBaiduSharedFile(text: string): BaiduSharedFile | null {
+  // ★ 2026-10-14：`baidu@<base64(JSON)>` 描述符（盘搜/免转存家族）——
+  //   `{shareId, fileId(=fs_id), uk, randsk(=BDCLND/seKey)}` 已含免转存全部凭据，直接映射。
+  {
+    const desc = parseDriveDescriptor(text);
+    if (desc && desc.provider === 'baidu') {
+      const shareId = descriptorField(desc.data, 'shareId', 'share_id');
+      const uk = descriptorField(desc.data, 'uk');
+      const fsid = descriptorField(desc.data, 'fileId', 'fs_id', 'fsid');
+      const sekey = descriptorField(desc.data, 'randsk', 'seKey', 'sekey', 'bdclnd');
+      if (/^\d+$/.test(shareId) && /^\d+$/.test(uk) && /^\d+$/.test(fsid) && sekey) {
+        return { shareId, uk, fsid, sekey, name: extractBaiduInnerName(text) };
+      }
+    }
+  }
   try {
     const d = JSON.parse(text);
     if (!d || typeof d !== 'object' || Array.isArray(d)) return null;

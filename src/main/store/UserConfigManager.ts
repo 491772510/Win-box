@@ -494,6 +494,26 @@ export class UserConfigManager {
     return { index: replaced ? idx : lives.length - 1, replaced };
   }
 
+  /**
+   * ★ 2026-10-14（用户要求）：删除某条**直播线路**（下标越界静默 no-op）。
+   * 同步收敛 activeLiveIndex，避免删除后选中态悬空（越界 clamp 到末条）。
+   */
+  deleteLive(index: number): void {
+    const i = Math.floor(index);
+    if (!Number.isFinite(i) || i < 0 || i >= this.snap.lives.length) return;
+    const lives = this.snap.lives.filter((_, n) => n !== i);
+    const activeLiveIndex = clampIndex(this.snap.ui.activeLiveIndex, lives.length);
+    this.apply({ ...this.snap, lives, ui: { ...this.snap.ui, activeLiveIndex } });
+  }
+
+  /** ★ 2026-10-14（用户要求）：重命名某条直播线路（空名/越界静默 no-op）。 */
+  updateLiveName(index: number, name: string): void {
+    const i = Math.floor(index);
+    const t = (name || '').trim();
+    if (!t || !Number.isFinite(i) || i < 0 || i >= this.snap.lives.length) return;
+    this.apply({ ...this.snap, lives: this.snap.lives.map((l, n) => (n === i ? { ...l, name: t } : l)) });
+  }
+
   // ---------------------------------------------------------------
   private apply(next: UserConfig, kind: ConfigChangeKind = 'content'): void {
     // ★ 2026-09-30：内容型变更必须把「当前生效档案」的存档 json 一起对齐（见 withActiveProfileSynced）

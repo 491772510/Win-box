@@ -79,9 +79,16 @@ declare global {
         importJsonLocal: (name?: string) =>
           Promise<IpcResult<{ ok: boolean; file?: string; name?: string; error?: string; result?: ImportReturn }>>;
         importPyLocal: () => Promise<IpcResult<{ ok: boolean; key?: string; error?: string }>>;
-        /** ★ 2026-09-30（用户要求）：导入本地 TXT / M3U 直播源 */
-        importLiveLocal: () =>
-          Promise<IpcResult<{ ok: boolean; name?: string; index?: number; replaced?: boolean; total?: number; error?: string }>>;
+        /**
+         * ★ 2026-09-30（用户要求）：导入本地 TXT / M3U 直播源。
+         * ★ 2026-10-14：两步导入 —— 首次返回 `needsName` 由渲染层弹框命名，二次带 `{ path, name }` 登记。
+         */
+        importLiveLocal: (args?: { name?: string; path?: string }) =>
+          Promise<IpcResult<{ ok: boolean; needsName?: boolean; path?: string; name?: string; index?: number; replaced?: boolean; total?: number; error?: string }>>;
+        /** ★ 2026-10-14（用户要求）：删除某条直播线路（下标） */
+        deleteLive: (index: number) => Promise<IpcResult<void>>;
+        /** ★ 2026-10-14（用户要求）：重命名某条直播线路 */
+        updateLive: (a: { index: number; name: string }) => Promise<IpcResult<void>>;
         /** ★ 2026-09-29：导入本地包（目录包：影视.json + py/js/jar/html/xbpq） */
         importPackage: (args?: { name?: string; root?: string }) =>
           Promise<IpcResult<{ ok: boolean; root?: string; rel?: string; sites?: number; name?: string; needsName?: boolean; error?: string; warnings?: string[]; result?: ImportReturn }>>;
@@ -307,8 +314,15 @@ export const client = {
   /** ★ 2026-09-30（用户要求）：一步完成「切换档案 + 选中该档案下的源」 */
   cfgSwitchProfileSource: (profileId: string, key: string) =>
     unwrap(window.api.config.switchProfileSource({ profileId, key })),
-  /** ★ 2026-09-30（用户要求）：导入本地 TXT / M3U 直播源（配置页按钮） */
-  cfgImportLiveLocal: () => unwrap(window.api.config.importLiveLocal()),
+  /**
+   * ★ 2026-09-30（用户要求）：导入本地 TXT / M3U 直播源（配置页按钮）。
+   * ★ 2026-10-14：两步导入 —— 首次返回 `needsName` 由渲染层弹框命名，二次带 `{ path, name }` 登记。
+   */
+  cfgImportLiveLocal: (args?: { name?: string; path?: string }) => unwrap(window.api.config.importLiveLocal(args)),
+  /** ★ 2026-10-14（用户要求）：删除某条直播线路（下标） */
+  cfgDeleteLive: (index: number) => unwrap(window.api.config.deleteLive(index)),
+  /** ★ 2026-10-14（用户要求）：重命名某条直播线路 */
+  cfgUpdateLive: (a: { index: number; name: string }) => unwrap(window.api.config.updateLive(a)),
   /** ★ 2026-09-30：数据目录信息（安装目录/data；迁移结果与回退原因） */
   dataDir: () => unwrap(window.api.system.dataDir()),
   vodDebug: (key: string) => unwrap(window.api.config.vodDebug(key)),

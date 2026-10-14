@@ -139,3 +139,18 @@
 :root[data-theme='bilibili'] .app.pwin, :root[data-theme='bilibili'] .app.pwin .main { background: #000; }
 :root[data-theme='bilibili'] .app.pwin .titlebar { background: #000; border-bottom: none; }
 :root[data-theme='bilibili'] .app.pwin .tb-title { color: #e5e5e5; }
+
+/* ★ 2026-10-14（用户要求）：哔哔皮肤里**播放器窗口的边框应为白色而非黑色** ——
+   仅针对独立播放器窗口（`.app.pwin.pvwin`，含标题栏/小窗条/窗口壳；mpv 内核的浮层除外）；
+   视频舞台 `.vplayer` 仍是纯黑（观看时需要），详情窗口等其它 `.app.pwin` 不受影响。 */
+:root[data-theme='bilibili']:not([data-mpv]) .app.pwin.pvwin,
+:root[data-theme='bilibili']:not([data-mpv]) .app.pwin.pvwin .main { background: #fff; }
+:root[data-theme='bilibili']:not([data-mpv]) .app.pwin.pvwin .titlebar { background: #fff; border-bottom: 1px solid var(--b-line); }
+:root[data-theme='bilibili']:not([data-mpv]) .app.pwin.pvwin .tb-title { color: var(--text); }
+:root[data-theme='bilibili']:not([data-mpv]) .app.pwin.pvwin .tb-btn { color: var(--b-text2); }
+:root[data-theme='bilibili']:not([data-mpv]) .app.pwin.pvwin .tb-btn:hover { background: var(--b-page); color: var(--text); }
+:root[data-theme='bilibili']:not([data-mpv]) .app.pwin.pvwin .tb-btn.tb-close:hover { background: #fb7299; color: #fff; }
+:root[data-theme='bilibili'] .app.pwin.pvwin .mini-strip { background: rgba(241, 242, 243, .92); color: var(--b-text2); }
+:root[data-theme='bilibili'] .app.pwin.pvwin .mini-btn { color: var(--b-text2); }
+:root[data-theme='bilibili'] .app.pwin.pvwin .mini-btn:hover { background: rgba(0, 0, 0, .08); color: var(--text); }
+:root[data-theme='bilibili'] .app.pwin.pvwin .mini-strip-close:hover { background: #fb7299; color: #fff; }
