@@ -250,6 +250,10 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
   registerHandler(IPC.DRIVE_QR_CREATE, (_e: any, provider?: string) => host.driveQrCreate(provider), log);
   registerHandler(IPC.DRIVE_QR_POLL, (_e: any, provider: string, sid: string) => host.driveQrPoll(provider, sid), log);
   registerHandler(IPC.DRIVE_WEB_LOGIN, (_e: any, provider: string) => host.driveWebLogin(provider), log);
+  registerHandler(IPC.DRIVE_UC_TV_STATUS, () => host.ucTvStatus(), log);
+  registerHandler(IPC.DRIVE_UC_TV_QR_CREATE, () => host.ucTvQrCreate(), log);
+  registerHandler(IPC.DRIVE_UC_TV_QR_POLL, () => host.ucTvQrPoll(), log);
+  registerHandler(IPC.DRIVE_UC_TV_REMOVE, () => host.ucTvRemove(), log);
 
   // 外挂字幕（多源：assrt（需 token）/ SubtitleCat（免 token））
   registerHandler(IPC.SUBTITLE_GET, () => host.subtitleGetSettings(), log);

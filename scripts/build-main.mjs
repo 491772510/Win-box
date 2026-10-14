@@ -7,6 +7,10 @@ import { dirname, resolve } from 'node:path';
 //   蜘蛛里 okhttp 4.x 参数序的 `RequestBody.create(String, MediaType)` 调用会退回 NoSuchMethodError。
 //   上游 jar 未 provision 时静默跳过（不阻断构建）。
 import { generateOkHttp4Compat } from './gen-okhttp-compat.mjs';
+// ★ 2026-10-14：prefs 影子 jar（`resources/jvm/prefs-shim/winbox-prefs-shim.jar`）同样是**派生生成物**
+//   且 `resources/jvm/**/*.jar` 不进仓库 ⇒ 随构建现场产出；缺失时 stubs.jar 里那个纯内存的
+//   `android/content/SharedPreferences$Mem` 会让 wex 族永远读到空 cookie。
+import { generatePrefsShim } from './gen-prefs-shim.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const src = resolve(root, '..');
@@ -17,6 +21,13 @@ try {
   console.log(r ? `[okhttp4-compat] 已生成（追加 ${r.added} 个重载）` : '[okhttp4-compat] 跳过（上游 okhttp-3.14.9.jar 不存在）');
 } catch (e) {
   console.warn(`[okhttp4-compat] 生成失败（不阻断构建）: ${(e && e.message) || e}`);
+}
+
+try {
+  const r = await generatePrefsShim();
+  console.log(`[prefs-shim] 已生成（${r.bytes} bytes, 影子类 ${r.entry}）`);
+} catch (e) {
+  console.warn(`[prefs-shim] 生成失败（不阻断构建）: ${(e && e.message) || e}`);
 }
 
 const opts = {

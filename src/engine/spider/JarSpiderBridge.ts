@@ -21,8 +21,6 @@ import {
   type DisguiseAttempt,
 } from '../util/fetchWithDisguise';
 import { NullLogger } from '../util/logger';
-// ★ 2026-09-30：蜘蛛沙箱盘 —— 把第三方 jar 写的安卓绝对路径（/data/…）收进数据目录（见 jailDrive 头注释）
-import { ensureJailDrive, jailSpawnCwd, releaseJailDrive, JAIL_DIR_NAME } from '../util/jailDrive';
 import { buildZip, listZipEntries, looksLikeZip, readZipEntries, zipEntrySizes, type ZipEntryData } from '../util/syncZip';
 import { SpiderProcPool, poolEnabled, servePoolKey, WARM_METHOD, type PoolResult } from './SpiderProcPool';
 import { fixSelfSuperCallsInJarFile } from './classFix';
@@ -33,6 +31,8 @@ import { patchSpiderProxyInJarFile } from './appProxyStub';
 //   必 NoSuchMethodError。修法 = 把「补了 4.x 重载的 RequestBody」打成小 jar 排在 -cp 最前
 //   （父加载器先命中者生效，覆盖一切来源的调用者，含 Java 侧 runtime-dex 产物；见 okhttp4Compat.ts）。
 import { OKHTTP4_COMPAT_JAR } from './okhttp4Compat';
+// ⚠ 2026-10-14：上游 1.21.4 的 prefs 影子 jar（PREFS_SHIM_JAR）本仓**刻意不启用**
+//   （理由见下方 classpathJars() 注释），故这里不 import 它的常量。
 import { hasNativeMethods } from './nativeClass';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import { GO_PROXY_LIMITATION_LOG, isGoProxySkipLine } from '../../shared/desktopLimits';
@@ -368,13 +368,11 @@ export class JarSpiderBridge {
     // 池默认启用（生产）；VITEST 或 TVBOX_DISABLE_SPIDER_POOL=1 关闭（单测走一次性路径，argv 断言零改动）
     if (poolEnabled()) {
       this.pool = new SpiderProcPool((spec) => {
-        // ★ 2026-09-30 蜘蛛沙箱盘：cwd 必须是沙箱盘根，否则第三方 jar 写的 `/data/…`
-        //   （无盘符根路径）会按**当前盘**解析、落到系统盘根目录（见 util/jailDrive 头注释）。
-        //   只给 JVM 子进程加（Python 源不经安卓路径，维持原 cwd 行为）。
-        const jailCwd = this.javaExeCandidates().includes(spec.exe) ? jailSpawnCwd() : '';
+        // ⚠ 2026-10-14 合并裁定（上游 1.21.4）：上游删除了「蜘蛛沙箱盘」（`subst` 建盘符 +
+        //   子进程 cwd）并在此处硬编码 `windowsHide: true`；本仓保留跨平台的 `spawnOptions()`
+        //   （win32 → windowsHide:true，darwin → false，见 src/shared/platform.ts），二者等价。
         const child = spawn(spec.exe, spec.serveArgv, {
           ...spawnOptions(),
-          ...(jailCwd ? { cwd: jailCwd } : {}),
           // ★ serve 进程 stdout 走行协议（池按物理行分帧），stderr 必须**消费**而不是 'ignore'：
           //   一是防 64KB 管道写满挂死蜘蛛，二是采集 SpiderLog 失败原因（空结果时上屏的人话提示）。
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -526,9 +524,20 @@ export class JarSpiderBridge {
   }
 
   /**
-   * 父加载器 classpath 组成：**stubs.jar → okhttp4 兼容 jar → libs/*.jar**（顺序即优先级）。
+   * 父加载器 classpath 组成：**prefs 影子 jar → stubs.jar → okhttp4 兼容 jar → libs/*.jar**（顺序即优先级）。
    *
-   * ★ 2026-10-14：兼容 jar **必须排在 libs 之前** —— 它只影子 `okhttp3/RequestBody`
+   * ⚠ 2026-10-14 合并裁定（上游 1.21.4 引入了 prefs 影子 jar，本仓**刻意不启用**）：
+   *   上游做法 = 生成 `android/content/SharedPreferences$Mem` 的替换类（见 prefsShim.ts /
+   *   `scripts/gen-prefs-shim.mjs`）排在 -cp 最前，影子掉 stubs.jar 里的**纯内存**原桩，改从
+   *   `<沙箱>/shared_prefs/seed.txt` 读种子 —— 动因是上游机器**没有 JDK**，无法重建 stubs.jar。
+   *   本仓不适用：`resources/jvm/stubs-src/android/content/SharedPreferences.java` 已是**真实实现**
+   *   （任意表的 XML 都能落盘 + 宿主默认值按 mtime 兜底），且本仓有 JDK 可重建（build-stubs.py）。
+   *   影子 jar 影子的是**整个 `$Mem` 类** ⇒ 一旦启用，**所有** SharedPreferences 表都会掉回纯内存
+   *   （丢掉落盘能力）。故此处**不把 prefs-shim 加入 classpath**，同一批键改走 properties 通道
+   *   （见 driveCookieFiles.syncWexHostPrefs / SpiderHost.syncDriveFiles / docs/jvm-notes.md）。
+   *   ⚠ jar 仍由 `scripts/build-main.mjs` 现场生成（无害，便于对照/将来切换），只是不参与加载。
+   *
+   * ★ 2026-10-14：okhttp4 兼容 jar **必须排在 libs 之前** —— 它只影子 `okhttp3/RequestBody`
    *   （= 3.14.9 原类 + 追加的 okhttp 4.x 参数序 `create` 重载，见 okhttp4Compat.ts）。
    *   父 cp 先命中者生效，排最前才能盖住 libs 里的原版；而问题调用发生在 **Java 侧
    *   runtime-dex 产物**里（Node 端改写 jar 够不到），只有「给宿主类补方法」这一条路能全覆盖。
@@ -537,7 +546,10 @@ export class JarSpiderBridge {
    */
   private classpathJars(): string {
     const fs = require('node:fs') as typeof import('node:fs');
-    const parts = [join(this.jvmDir, 'stubs', 'stubs.jar')];
+    const parts: string[] = [];
+    // ⚠ 不加入 prefs 影子 jar（`prefs-shim/winbox-prefs-shim.jar`）—— 理由见上方注释：
+    //   它影子的是整个 `android/content/SharedPreferences$Mem`，会让本仓已有的落盘实现失效。
+    parts.push(join(this.jvmDir, 'stubs', 'stubs.jar'));
     const compat = join(this.jvmDir, 'okhttp4-compat', OKHTTP4_COMPAT_JAR);
     if (fs.existsSync(compat)) parts.push(compat);
     parts.push(...this.libJars());
@@ -2260,12 +2272,13 @@ export class JarSpiderBridge {
     } catch {
       /* 建不了就交给 runner 用默认目录 */
     }
-    // ★★ 2026-09-30 蜘蛛沙箱盘（见 util/jailDrive 头注释，勿删）★★
-    //   第三方 jar 会写**安卓绝对路径**（`/data/data/…`、`/data/user/0/<pkg>/…`），
-    //   而 Windows 对「不带盘符的根路径」按**进程当前盘**解析 → 装在 D 盘就稳定往 `D:\data` 写垃圾。
-    //   ★ 真机 A/B 实测：`-Duser.dir` 只能改 Java 侧打印的路径串，**改不动真实落点**；
-    //     决定落点的是子进程 cwd —— 故两边都要给（见下方的 spawn cwd）。
-    const jailRoot = ensureJailDrive(join(this.cacheDir, '..', JAIL_DIR_NAME), this.host?.logger);
+    // ★★ 2026-10-14（用户指令：**不允许给用户系统建盘符**）★★
+    //   此前这里用 `subst` 建过「蜘蛛沙箱盘」（V:\ → <数据目录>\spider-jail），目的是让第三方 jar
+    //   写的**安卓绝对路径**（`/data/data/…`、`/data/user/0/<pkg>/…`）别落到盘根目录。
+    //   但那会在用户机器上凭空多出一个盘符（资源管理器/其它程序都可见）= 改人家系统，用户明确拒绝。
+    //   ⇒ **该机制已整条删除**（含 util/jailDrive.ts）。现在蜘蛛对 /data/… 的写入按 Windows 原语义
+    //   解析到「当前盘根」；我们只保留**不碰系统**的收容手段：`-Dtvbox.spiderCacheDir=<沙箱目录>`
+    //   （把 Android Context 的 getCacheDir/getFilesDir 收进数据目录，见下方参数）。
     return [
       // ★ 关闭字节码校验（-noverify）。原因：jar(dex) 经 dex2jar 转换后，
       //   分支处的 StackMapTable 帧往往不完整；Android 的 ART 不依赖这些帧，
@@ -2325,10 +2338,6 @@ export class JarSpiderBridge {
       // 透传给子 JVM 的 dex2jar classpath：真实 classpath → 平台分隔符。
       `-Dtvbox.d2j.cp=${this.cpJoin(this.dirJars(join(this.jvmDir, 'd2j')))}`,
       `-Dtvbox.d2j.cache=${join(this.cacheDir, 'runtime-dex')}`,
-      // ★ 2026-09-30 蜘蛛沙箱盘：让 Java 侧看到的「当前目录」= subst 虚拟盘根 →
-      //    spider 打印/存储的 `/data/…` 路径串与真实落点一致（真正决定落点的是 spawn 的 cwd）。
-      //   机制/取证见 util/jailDrive 头注释；建立失败时 jailRoot 为空串（不追加，行为与历史一致）。
-      ...(jailRoot ? [`-Duser.dir=${jailRoot}`] : []),
       '-cp', cp,
     ];
   }
@@ -2354,16 +2363,11 @@ export class JarSpiderBridge {
     return new Promise<string>((resolve) => {
       // ★ 网络代理环境变量（Python 蜘蛛/子进程的 requests 等会读它；JVM 侧另由 -D 参数负责）
       const proxyEnv = this.proxyProvider?.().env ?? {};
-      // ★ 2026-09-30 蜘蛛沙箱盘：cwd = subst 虚拟盘根（见 util/jailDrive 头注释）——
-      //   这是第三方 jar 写 `/data/…` 时真实落点的决定项；未建立映射时为空串（不传 cwd，行为同历史）。
-      //   只给 JVM 子进程加（Python 源不经安卓路径，维持原 cwd 行为）。
-      //   ★ 用候选集判定（而非单个 javaExePath()）：macOS 上真实 java 可能是
-      //     `jre/Contents/Home/bin/java`（第二种布局），仍须拿到沙箱盘 cwd。
-      const jailCwd = this.javaExeCandidates().includes(exe) ? jailSpawnCwd() : '';
+      // ⚠ 2026-10-14 合并裁定：上游已删除「蜘蛛沙箱盘」（`subst` 建盘符 + 子进程 cwd 覆盖），
+      //   本仓跟随删除（理由见上方 jvmPrefix 内同段说明）→ 这里不再有任何 cwd 覆盖。
       const child = spawn(exe, argv, {
         windowsHide: true,
         timeout: timeoutMs ?? this.callTimeoutMs,
-        ...(jailCwd ? { cwd: jailCwd } : {}),
         env: { ...process.env, ...proxyEnv, ...(env || {}) },
       });
       let out = '';
@@ -2506,8 +2510,6 @@ export class JarSpiderBridge {
       }
     }
     this.activeChildren.clear();
-    // ★ 2026-09-30：子进程都停了再解除蜘蛛沙箱盘的 subst 映射（留着会多个盘符；失败无所谓）
-    releaseJailDrive(this.host?.logger);
   }
 }
 

@@ -843,8 +843,15 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 }
 :root[data-theme][data-theme] input[type='checkbox']:checked:hover { background-color: var(--accent); filter: brightness(1.06); }
 :root[data-theme][data-theme] input[type='checkbox']:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-/* 例外：嵌在胶囊 chip 里的多选（配置页「合并档案」芯片）保持原生小方框 —— 开关尺寸放不进 chip。 */
+/* 例外①：嵌在胶囊 chip 里的多选（配置页「合并档案」芯片）保持原生小方框 —— 开关尺寸放不进 chip。 */
 :root[data-theme][data-theme] .tag input[type='checkbox'] {
+  appearance: auto; -webkit-appearance: auto; width: auto; height: auto; padding: 0; background: none;
+}
+/* 例外②：**列表里的「选择 / 多选」是勾选框语义，不是开关** —— ★ 2026-10-14 用户指令：
+   「配置-订阅与源-我的源列表，前面应该是选择框，而我们现在的样式是胶囊开关，胶囊开关应该用在
+     开关类的设置中，而不是这里」。故该表（表头全选 + 每行选择）保持原生小方框；
+   用 `.sel-box` **显式标记**（不依赖表格结构，任何列表里的多选都能复用）。 */
+:root[data-theme][data-theme] input[type='checkbox'].sel-box {
   appearance: auto; -webkit-appearance: auto; width: auto; height: auto; padding: 0; background: none;
 }
 

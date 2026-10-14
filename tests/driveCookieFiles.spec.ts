@@ -25,6 +25,10 @@ import {
   wexHostPrefsPath,
   syncWexHostPrefs,
   removeWexHostPref,
+  WEX_PREFS_NAME,
+  wexPrefsSeedPath,
+  syncWexPrefsSeed,
+  UCTV_PREF_KEYS,
 } from '../src/main/spider/driveCookieFiles';
 
 let root = '';
@@ -193,8 +197,10 @@ describe('driveCookieFiles — AiWex 系 SharedPreferences 默认值同步（202
     const sandbox = spiderSandboxDir(root);
     syncWexHostPrefs({ quark: 'A\r\nB' }, sandbox);
     const text = readFileSync(wexHostPrefsPath(sandbox), 'utf-8');
-    expect(text.trim().split('\n')).toHaveLength(1);
-    expect(text.trim()).toBe('Wex_quark_cookie=A B');
+    // ⚠ 2026-10-14 合并裁定：桌面环境键（pan.thread_proxy_mode）恒写入 → 这里只看凭据行
+    const cookieLines = text.trim().split('\n').filter((l) => l.startsWith('Wex_'));
+    expect(cookieLines).toHaveLength(1);
+    expect(cookieLines[0]).toBe('Wex_quark_cookie=A B');
   });
 
   it('解绑只摘掉那一个键，其它绑定不受影响', () => {
@@ -208,15 +214,16 @@ describe('driveCookieFiles — AiWex 系 SharedPreferences 默认值同步（202
     removeWexHostPref('quark', sandbox); // 幂等
   });
 
-  it('★ 全部解绑后文件写成空 —— 否则桩侧继续兜底，解绑不生效', () => {
+  it('★ 全部解绑后不再留任何凭据键 —— 否则桩侧继续兜底，解绑不生效', () => {
     const sandbox = spiderSandboxDir(root);
     syncWexHostPrefs({ quark: 'Q1', uc: 'U1' }, sandbox);
     removeWexHostPref('quark', sandbox);
     removeWexHostPref('uc', sandbox);
-    expect(readFileSync(wexHostPrefsPath(sandbox), 'utf-8')).toBe('');
-    // 再同步一次（tokens 为空）也必须留空文件，而不是留着旧内容
+    // ⚠ 2026-10-14 合并裁定：桌面环境键恒写入 → 文件不再为空，但**不能**再含任何 `Wex_*` 凭据键
+    expect(readFileSync(wexHostPrefsPath(sandbox), 'utf-8')).not.toContain('Wex_');
+    // 再同步一次（tokens 为空）也必须清掉旧凭据，而不是留着旧内容
     expect(syncWexHostPrefs({}, sandbox)).toEqual([]);
-    expect(readFileSync(wexHostPrefsPath(sandbox), 'utf-8')).toBe('');
+    expect(readFileSync(wexHostPrefsPath(sandbox), 'utf-8')).not.toContain('Wex_');
   });
 
   it('★ 内容没变就不重写 —— 桩侧按 mtime 裁定谁更新，每次启动都刷 mtime 会让宿主恒赢', () => {
@@ -229,7 +236,7 @@ describe('driveCookieFiles — AiWex 系 SharedPreferences 默认值同步（202
     expect(statSync(path).mtimeMs).toBe(old.getTime());
     syncWexHostPrefs({ quark: 'Q2' }, sandbox); // 内容变了 → 才刷新 mtime
     expect(statSync(path).mtimeMs).toBeGreaterThan(old.getTime());
-    expect(readFileSync(path, 'utf-8')).toBe('Wex_quark_cookie=Q2\n');
+    expect(readFileSync(path, 'utf-8')).toContain('Wex_quark_cookie=Q2');
   });
 
   it('解绑未绑定的 provider / 文件不存在：不抛也不创建', () => {
@@ -237,5 +244,53 @@ describe('driveCookieFiles — AiWex 系 SharedPreferences 默认值同步（202
     expect(() => removeWexHostPref('quark', sandbox)).not.toThrow();
     expect(() => removeWexHostPref('alipan', sandbox)).not.toThrow();
     expect(existsSync(wexHostPrefsPath(sandbox))).toBe(false);
+  });
+
+  // ★ 2026-10-14 合并裁定（上游 1.21.4）：本段（properties 通道）与下方上游的 seed 通道**并存**。
+  //   本仓以 properties 为准（本仓的桩是真实实现，会读它，见 JarSpiderBridge.classpathJars 注释），
+  //   seed.txt 仍照写、以备将来切换到上游的 prefs 影子 jar。
+});
+
+describe('driveCookieFiles — wex SharedPreferences 种子（第四通道 + UC TV Token，2026-10-14）', () => {
+  const readSeed = (sandbox: string): Record<string, string> => {
+    const path = wexPrefsSeedPath(sandbox);
+    const kv: Record<string, string> = {};
+    for (const line of readFileSync(path, 'utf-8').trim().split('\n')) {
+      const [name, key, value] = line.split('\t');
+      expect(name).toBe(WEX_PREFS_NAME); // 每行都是「表名 \t 键 \t 值」
+      kv[key] = value;
+    }
+    return kv;
+  };
+
+  it('写入 cookie 三键 + 环境键；ucTv 非空时追加 Wex_ucpan_token / Wex_ucpan_device_id', () => {
+    const sandbox = spiderSandboxDir(root);
+    const tvJson = '{"code":200,"data":{"access_token":"AT","refresh_token":"RT"}}';
+    const p = syncWexPrefsSeed({ uc: 'UC_CK', quark: 'Q_CK', baidu: 'B_CK' }, sandbox, { deviceId: 'dev1', token: tvJson });
+    expect(p).toBe(wexPrefsSeedPath(sandbox));
+    const kv = readSeed(sandbox);
+    expect(kv['Wex_ucpan_cookie']).toBe('UC_CK');
+    expect(kv['Wex_quark_cookie']).toBe('Q_CK');
+    expect(kv['Wex_baidu_cookie']).toBe('B_CK');
+    expect(kv[UCTV_PREF_KEYS.token]).toBe(tvJson);
+    expect(kv[UCTV_PREF_KEYS.deviceId]).toBe('dev1');
+    expect(kv['pan.thread_proxy_mode']).toBe('java');
+  });
+
+  it('ucTv 为空/无值时这两键消失（重写种子即生效，避免残留旧 token）', () => {
+    const sandbox = spiderSandboxDir(root);
+    syncWexPrefsSeed({ uc: 'UC_CK' }, sandbox, { deviceId: 'dev1', token: 'TOK' });
+    expect(readSeed(sandbox)['Wex_ucpan_token']).toBe('TOK');
+    syncWexPrefsSeed({ uc: 'UC_CK' }, sandbox);
+    expect(readSeed(sandbox)['Wex_ucpan_token']).toBeUndefined();
+  });
+
+  it('值里的 \\r\\n\\t 会被剔除（种子是按行/制表符切分的纯文本）', () => {
+    const sandbox = spiderSandboxDir(root);
+    syncWexPrefsSeed({ uc: 'U\nC' }, sandbox, { deviceId: 'd\te', token: '{"a":\n1}' });
+    const kv = readSeed(sandbox);
+    expect(kv['Wex_ucpan_cookie']).toBe('UC');
+    expect(kv['Wex_ucpan_token']).toBe('{"a":1}');
+    expect(kv['Wex_ucpan_device_id']).toBe('de');
   });
 });

@@ -4,6 +4,8 @@ import { request as undiciRequest } from 'undici';
 import { JsonStore } from '../store/JsonStore';
 import { UserConfigManager, subscriptionStamp, type ConfigChangeKind } from '../store/UserConfigManager';
 import { DriveStore } from '../store/DriveStore';
+import { UcTvStore } from '../store/UcTvStore';
+import { ucTvAuthorize, ucTvDeviceId, ucTvExchange, ucTvPollCode } from '../net/ucTvToken';
 import type { LocalPkgAccess } from '../store/LocalPkgStore';
 import { parsePkgUrl } from '../../engine/config/localPkg';
 import { getAdapter } from '../net/qr';
@@ -71,7 +73,9 @@ import {
   syncPizazzCookieFiles,
   syncWexCookieFiles,
   syncWexHostPrefs,
+  syncWexPrefsSeed,
   spiderSandboxDir,
+  WEX_PREF_KEYS,
 } from './driveCookieFiles';
 import { sourceTimeoutMs } from '../../engine/spider/SpiderFactory';
 import { mergeSearchResults, isSearchableSource, type AggSearchInput } from '../../engine/vod/aggSearch';
@@ -275,6 +279,14 @@ export class SpiderHost {
   private vm: SourceViewModel;
   private manager: UserConfigManager;
   private drives: DriveStore;
+  /**
+   * ★ 2026-10-14 UC TV Token（非会员 UC 原画）：独立于 DriveStore 存放 —— DriveStore 的每个键都会
+   *   被注入到**所有**蜘蛛的 ext（见 engine/spider/driveExt），而该 token 只是 wex 族
+   *   SharedPreferences 的一个值，与 ext 无关。绑定时写入 `<沙箱>/shared_prefs/seed.txt`。
+   */
+  private ucTvStore!: UcTvStore;
+  /** 进行中的 UC TV Token 扫码会话（取码 → 轮询 → 兑换 复用同一 reqId/deviceId） */
+  private ucTvBind: { reqId: string; queryToken: string; deviceId: string } | null = null;
   private subtitles: SubtitleStore;
   private danmakuStore: DanmakuStore;
   /** ★ 弹幕内容缓存（只缓存成功非空结果；上限 200 条防无限增长，满则淘汰最旧）——修复 D4
@@ -412,6 +424,7 @@ export class SpiderHost {
     // 用户配置持久化：<userData>/user-config.json；重启后恢复 sources/lives/全局 jar/选中源
     this.manager = new UserConfigManager(new JsonStore(join(userDataDir(), 'user-config.json')), this.logger);
     this.drives = new DriveStore(new JsonStore(join(userDataDir(), 'drive-tokens.json')), this.logger, safeStorageDriveCodec());
+    this.ucTvStore = new UcTvStore(new JsonStore(join(userDataDir(), 'uc-tv-token.json')), this.logger, safeStorageDriveCodec());
     this.subtitles = new SubtitleStore(join(userDataDir(), 'subtitle.json'), this.logger, safeStorageDriveCodec());
     this.danmakuStore = new DanmakuStore(join(userDataDir(), 'danmaku.json'), this.logger);
     this.metaStore = new MetaStore(new JsonStore(join(userDataDir(), 'meta.json')));
@@ -780,6 +793,49 @@ export class SpiderHost {
     // ★ 2026-10-13：AiWex 系走 SharedPreferences，解绑同样要撤掉宿主兜底值
     removeWexHostPref(provider, sandbox);
     this.resetSpidersAfterDriveChange();
+  }
+
+  // ---- UC TV Token（非会员 UC 原画；见 net/ucTvToken.ts 头注释与 store/UcTvStore.ts） ----
+  /** 绑定状态（不回传 token 明文，只告知 UI 是否已绑定） */
+  ucTvStatus(): { bound: boolean } {
+    return { bound: !!this.ucTvStore.get() };
+  }
+
+  /** 取码：生成 UC TV Token 二维码（同时固定设备 ID，供后续轮询/兑换复用） */
+  async ucTvQrCreate(): Promise<{ imageDataUrl: string }> {
+    const deviceId = this.ucTvStore.get()?.deviceId || ucTvDeviceId();
+    const s = await ucTvAuthorize(deviceId);
+    this.ucTvBind = { reqId: s.reqId, queryToken: s.queryToken, deviceId };
+    this.logger.i(`uc-tv-token: 取码成功（reqId=${s.reqId}，device_id=${deviceId}）`);
+    return { imageDataUrl: s.imageDataUrl };
+  }
+
+  /** 轮询：手机上确认后兑换 token 并落盘（写 prefs 种子 + 重置蜘蛛，使新 token 立即生效） */
+  async ucTvQrPoll(): Promise<{ state: 'wait' | 'ok' | 'expired' | 'error'; hint?: string }> {
+    const s = this.ucTvBind;
+    if (!s) return { state: 'expired', hint: '请先获取二维码' };
+    const r = await ucTvPollCode(s.reqId, s.queryToken, s.deviceId);
+    if (r.state !== 'ok') {
+      if (r.state === 'expired' || r.state === 'error') this.ucTvBind = null;
+      return { state: r.state, hint: r.hint };
+    }
+    const ex = await ucTvExchange(s.reqId, r.code || '', s.deviceId);
+    if (!ex.ok || !ex.token) return { state: 'error', hint: ex.hint || 'UC TV Token 兑换失败' };
+    this.ucTvStore.set(s.deviceId, ex.token);
+    this.ucTvBind = null;
+    this.syncDriveFiles();
+    this.resetSpidersAfterDriveChange();
+    this.logger.i('uc-tv-token: 绑定成功（已写入 Wex_ucpan_token / Wex_ucpan_device_id 并重置蜘蛛）');
+    return { state: 'ok' };
+  }
+
+  /** 解绑：删除凭据、重写种子、重置蜘蛛 */
+  ucTvRemove(): void {
+    this.ucTvStore.remove();
+    this.ucTvBind = null;
+    this.syncDriveFiles();
+    this.resetSpidersAfterDriveChange();
+    this.logger.i('uc-tv-token: 已解绑');
   }
 
   // ---- 外挂字幕（多源：assrt（需 token）/ SubtitleCat（免 token）；偏好在 SubtitleStore） ----
@@ -1403,10 +1459,27 @@ export class SpiderHost {
     } else if (tokens.uc) {
       this.logger.w(`wex UC cookie 未写入（sandbox=${sandbox}, ucLen=${tokens.uc.trim().length}）`);
     }
-    // ★ 2026-10-13：AiWex 系（新光影 / AiPan1Me / 玩偶 / 木偶 …）读的是 SharedPreferences
-    //   `Wex_*_cookie`，只有这里同步了，扫码绑定的夸克/UC/百度才会被那一族源认账。
-    const prefKeys = syncWexHostPrefs(tokens, sandbox);
-    if (prefKeys.length) this.logger.i(`已同步 AiWex 系网盘凭据（SharedPreferences 默认值）：${prefKeys.join(', ')}`);
+    // ★ 第四通道（2026-10-14 根因修复）：wex 族的 `Wex_*_cookie` 实际存在 SharedPreferences
+    //   `NewWexFnw_preferences`（反编译实证，见 driveCookieFiles.ts 同段注释）。
+    //   ★ 2026-10-14 追加：非会员 UC 原画所需的 `Wex_ucpan_token` / `Wex_ucpan_device_id` 同通道写入。
+    const ucTv = this.ucTvStore.get();
+    // ⚠ 2026-10-14 合并裁定（上游 1.21.4）：上游走「prefs 影子 jar + seed.txt」，本仓走
+    //   「stubs.jar 内真实 SharedPreferences 实现 + winbox-host-prefs.properties」。
+    //   本仓的桩实现是**通用**的（任意表的 XML 都能落盘 + 宿主默认值按 mtime 兜底），
+    //   而影子 jar 影子的是 `android/content/SharedPreferences$Mem` 整个类 ⇒ 启用它会让
+    //   **所有** SharedPreferences 表掉回纯内存（丢掉本仓已有的落盘能力）。故这里以
+    //   properties 通道为准（ucTv 一并写入）；seed.txt 仍照写，保留上游通道以备切换。
+    //   详见 JarSpiderBridge.classpathJars() 注释。
+    const prefKeys = syncWexHostPrefs(tokens, sandbox, ucTv);
+    if (prefKeys.length) {
+      this.logger.i(`已同步 AiWex 系网盘凭据（SharedPreferences 默认值）：${prefKeys.join(', ')}`);
+    }
+    const seed = syncWexPrefsSeed(tokens, sandbox, ucTv);
+    if (seed) {
+      this.logger.i(
+        `已同步 wex 系 SharedPreferences 种子：${seed}（键=${Object.values(WEX_PREF_KEYS).join(',')}${ucTv ? ',Wex_ucpan_token,Wex_ucpan_device_id' : ''}）`,
+      );
+    }
   }
 
   /** 把网盘凭据同步写入 fty 的 Cloud-drive 配置文件（jar 源从该文件读 quarkCookie/ucCookie 等） */
@@ -2199,8 +2272,8 @@ export class SpiderHost {
    * ★★ **绝不能改用 `dispose()`** ★★
    * `dispose()` 是给「应用退出」用的：它会 `clearInterval(this.poolReclaimTimer)`，
    * 而该定时器**只在构造时创建一次、不会重建** —— 用一次就再没有空闲回收，
-   * 之后每次软重启都会累积常驻 JVM 进程。它还 `releaseJailDrive()` 卸掉沙箱盘，
-   * 这里也不需要（沙箱目录仍在使用，下次调用会自动 ensure）。
+   * 之后每次软重启都会累积常驻 JVM 进程。它还会顺带卸掉蜘蛛沙箱 / 缓存目录，
+   * 这里也不需要（沙箱目录仍在使用，下次调用会自动重建）。
    */
   resetSpidersForConfigReload(): void {
     this.vm.spiderFactory.clear();

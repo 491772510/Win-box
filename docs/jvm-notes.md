@@ -424,3 +424,36 @@ JAVA_HOME="C:/Program Files/Java/jdk-17" npx vitest run tests/jvmSpawnArgs.spec.
 | `src/engine/spider/JarSpiderBridge.ts` | 桌面桥：classpath、`-noverify`、`javaExeCandidates()` |
 | `src/main/util/paths.ts` | `javaCandidates()`（随包 JRE 的 java 候选） |
 | `src/shared/platform.ts` | `javaExeName()` / `joinClasspath()` 等平台真源 |
+
+---
+
+## 7. 与上游合并时的两个固定取舍（★ 自 1.21.4 起）
+
+> 上游 `yagami-hue/Win-box` 与本仓对**同一个问题**各自有解法。合并时按下面裁定，不必逐次重新纠结。
+
+### 7.1 「wex 族读不到 SharedPreferences 里的 cookie」→ **本仓用自己的桩实现，不启用上游的影子 jar**
+
+| | 上游（1.21.4 起） | 本仓 |
+|---|---|---|
+| 手法 | Node 现场生成替换类 `android/content/SharedPreferences$Mem`（`src/engine/spider/prefsShim.ts` + `scripts/gen-prefs-shim.mjs`），排在 `-cp` **最前**影子掉原桩 | 把 `resources/jvm/stubs-src/android/content/SharedPreferences.java` 写成**真实实现**（XML 落盘 + `shared_prefs/winbox-host-prefs.properties` 宿主默认值 + 按 mtime 裁定谁新），重建 `stubs.jar` |
+| 数据来源 | `<沙箱>/shared_prefs/seed.txt`（`表名 \t 键 \t 值` 三段式） | 同一批键，写进 `winbox-host-prefs.properties`（`key=value` 每行） |
+| 上游动因 | **上游机器没有 JDK** → 无法重建 `stubs.jar` | 本仓有 JDK（见 §5 ①） |
+| 持久化 | 无（纯内存，读完种子就结束） | 有（**任意**表的 XML 都能落盘） |
+
+**裁定 = 不把 `prefs-shim/winbox-prefs-shim.jar` 加进 classpath**（见 `JarSpiderBridge.classpathJars()`）。
+原因：影子 jar 影子的是**整个 `$Mem` 类** ⇒ 一旦启用，**所有** SharedPreferences 表都会掉回纯内存，
+本仓已有的落盘能力全丢（不只是 wex 那一张表）。
+
+- jar 仍由 `scripts/build-main.mjs` 现场生成（无害，便于对照 / 将来切换），**只是不参与加载**。
+- 上游的 `syncWexPrefsSeed()` **照旧写** `seed.txt`，与 properties 通道并存 → 将来要切到影子 jar 无需改业务代码。
+- ⚠ 因此**新增的 wex 相关 prefs 键必须同时进两条通道**：`WEX_PREF_ENV` / `UCTV_PREF_KEYS` 在
+  `driveCookieFiles.ts` 里已同时被两处使用（`syncWexHostPrefs` 与 `syncWexPrefsSeed`）。
+
+### 7.2 「蜘蛛沙箱盘」（`subst` 建盘符 + 子进程 `cwd`）→ **已随上游删除，不要再加回来**
+
+- 旧实现：`src/engine/util/jailDrive.ts`（用 `subst` 建 `V:\` → 数据目录），`JarSpiderBridge` 给 JVM
+  子进程传 `cwd = 沙箱盘根`，目的是让第三方 jar 写的安卓绝对路径 `/data/…` 不落到盘根。
+- 删除理由（上游 1.21.4，用户指令）：**不允许给用户系统建盘符**（资源管理器里凭空多一个盘符）。
+  现在 `/data/…` 按 Windows 原语义解析到「当前盘根」；不碰系统的收容手段只剩
+  `-Dtvbox.spiderCacheDir=<沙箱目录>`（把 `getCacheDir` / `getFilesDir` 收进数据目录）。
+- 对应回归断言：`tests/jvmSpawnArgs.spec.ts` →「不再覆盖子进程 cwd（JVM 与 Python 均无 cwd 参数）」。
