@@ -20,6 +20,7 @@
 import type { Logger } from '../../shared/types';
 import { resolveShareFile, extractCompoundPanEpisode, type ShareListFetcher } from './quarkTransfer';
 import { mergeSetCookies } from './cookieMerge';
+import { parseDriveDescriptor, descriptorField } from './driveDescriptor';
 
 const REF = 'https://drive.uc.cn/';
 const BASE = 'https://pc-api.uc.cn/1/clouddrive';
@@ -113,6 +114,9 @@ const UC_SHARE_ID_RE = /(?:drive|fast)\.uc\.cn\/s\/([0-9a-zA-Z_-]+)/i;
 
 /** 该 episode id 是否是 UC 分享（兼容 percent-encoded 形态）；大小写不敏感 */
 export function isUcSharePlay(id: string): boolean {
+  // ★ 2026-10-14：`uc@<base64(JSON)>` 描述符（盘搜/免转存家族）
+  const desc = parseDriveDescriptor(id);
+  if (desc) return desc.provider === 'uc';
   return shareTextCandidates(id).some((s) => UC_SHARE_ID_RE.test(s));
 }
 
@@ -123,6 +127,14 @@ export function isUcSharePlay(id: string): boolean {
  * ★ 兼容 query 值里的 percent-encoded 分享链接（见 shareTextCandidates）。
  */
 export function extractUcShare(id: string, flag = ''): { pwdId: string; passcode: string } | null {
+  // ★ 2026-10-14：`uc@<base64(JSON)>` 描述符 → 直接取 shareId(=pwd_id)（与 quark 描述符同构）
+  {
+    const desc = parseDriveDescriptor(id);
+    if (desc && desc.provider === 'uc') {
+      const pwdId = descriptorField(desc.data, 'shareId', 'pwdId', 'sId');
+      if (pwdId) return { pwdId, passcode: String(desc.data.passcode || '') };
+    }
+  }
   // fty 的 UC/夸克描述都使用 sId/fid，sId 本身不能决定网盘。
   // 仅在明确 UC 线路（优汐是 fty 的 UC 名称）下解释该描述；不凭通用字段猜提供商。
   if (/^(?:UC(?:\b|网盘)|优汐)/i.test(flag)) {

@@ -350,6 +350,18 @@ export default function ConfigPage() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [sourcePick, setSourcePick] = useState<Set<string>>(new Set());
   const [sourceDeleteBusy, setSourceDeleteBusy] = useState(false);
+  /**
+   * ★ 2026-10-14（用户要求）：导入 TXT / M3U 直播源需要**单独弹框命名**（对齐本地包命名流程），
+   * 并允许对已导入的直播线路**改名 / 删除**。
+   */
+  const [liveNamePrompt, setLiveNamePrompt] = useState<{ path: string; name: string } | null>(null);
+  const liveNameDialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = liveNameDialogRef.current;
+    if (liveNamePrompt && dialog && !dialog.open) dialog.showModal();
+  }, [liveNamePrompt]);
+  const [liveEditIdx, setLiveEditIdx] = useState<number | null>(null);
+  const [liveEditName, setLiveEditName] = useState('');
   const sourceProfileRef = useRef<string | null>(null);
   const selectAllSourcesRef = useRef<HTMLInputElement>(null);
 
@@ -515,7 +527,8 @@ export default function ConfigPage() {
 
   /**
    * ★ 2026-09-30（用户要求）：导入本地 TXT / M3U 直播源（文件选择器）。
-   * 主进程落盘到 <userData>/local-live/ 并追加/更新一条直播线路；导入后「直播」页顶部线路下拉即可选到。
+   * ★ 2026-10-14（用户要求）：改为**两步导入**（对齐本地包命名流程）——
+   * 第一次选文件 → 主进程校验并归一化落盘 → 返回 `needsName` 由本页弹框命名；第二次带 `{ path, name }` 登记。
    */
   async function doImportLiveLocal() {
     setBusy(true);
@@ -523,16 +536,74 @@ export default function ConfigPage() {
     setLastOk('');
     try {
       const r = await client.cfgImportLiveLocal();
+      if (r.needsName && r.path) {
+        setLiveNamePrompt({ path: r.path, name: r.name || '直播源' });
+        return;
+      }
       if (r.ok) {
         setLastOk(
           `已导入直播源：${r.name || ''}${r.replaced ? '（同一文件已更新）' : `（直播页线路第 ${(r.index ?? 0) + 1} 条，共 ${r.total ?? 0} 条）`}`,
         );
+        await refresh();
       } else if (r.error) setErr(r.error);
       // r.ok=false 且无 error = 用户取消文件选择，静默
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** ★ 2026-10-14：命名弹框第二步 —— 用输入的名称登记/更新直播线路。 */
+  async function confirmLiveName() {
+    const prompt = liveNamePrompt;
+    const name = prompt?.name.trim();
+    if (!prompt || !name || busy) return;
+    setBusy(true);
+    setErr('');
+    try {
+      const r = await client.cfgImportLiveLocal({ path: prompt.path, name });
+      if (r.ok) {
+        setLastOk(
+          `已导入直播源：${r.name || ''}${r.replaced ? '（同一文件已更新）' : `（直播页线路第 ${(r.index ?? 0) + 1} 条，共 ${r.total ?? 0} 条）`}`,
+        );
+        setLiveNamePrompt(null);
+        await refresh();
+      } else if (r.error) {
+        setErr(r.error);
+      }
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** ★ 2026-10-14（用户要求）：删除某条直播线路（导入的 TXT/M3U 直播源从此可删）。 */
+  async function delLive(index: number, name: string) {
+    if (!window.confirm(`确定删除直播线路「${name || `线路${index + 1}`}」吗？\n删除后直播页顶部线路下拉将不再出现它（原始文件不会被改动）。`)) return;
+    setErr('');
+    try {
+      await client.cfgDeleteLive(index);
+      if (liveEditIdx === index) { setLiveEditIdx(null); setLiveEditName(''); }
+      await refresh();
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  }
+
+  /** ★ 2026-10-14（用户要求）：直播线路改名（内联编辑）。 */
+  async function saveLiveName(index: number) {
+    const name = liveEditName.trim();
+    setLiveEditIdx(null);
+    setLiveEditName('');
+    if (!name) return;
+    setErr('');
+    try {
+      await client.cfgUpdateLive({ index, name });
+      await refresh();
+    } catch (e) {
+      setErr((e as Error).message);
     }
   }
 
@@ -683,10 +754,24 @@ export default function ConfigPage() {
     if (left === 0) {
       setMergeMsg({ text: `已删除全部 ${failed.length} 个失败源（没有剩余源，未生成新配置）`, kind: 'ok' });
     } else {
-      // ★ 自动把剩余源组合为新档案并显示在「已保存配置」里
-      const stamp = new Date().toISOString().slice(5, 16).replace('T', ' ');
-      const p = await client.cfgSaveAsProfile(`清理后(${left}源) ${stamp}`);
-      setMergeMsg({ text: `已删除 ${failed.length} 个失败源；剩余 ${left} 个源已自动保存为新配置「${p.name}」并切换到它（见上方「已保存配置」）`, kind: 'ok' });
+      // ★ 2026-10-14（用户要求）：不再生成超长的「清理后(N源) MM-DD HH:MM」——
+      //   改用**当前档案名**，只把括号里的源数更新为新值（反复清理时只有那个数字变化）。
+      //   当前档案的存档 json 已随删除自动同步（见 UserConfigManager.withActiveProfileSynced），
+      //   因此直接改名即可，无需再新建一份重复档案。
+      const cur = cfg?.profiles.find((p) => p.id === cfg.activeProfileId)?.name || '';
+      const base = cur
+        .replace(/[（(]\s*\d+\s*源\s*[）)]\s*$/, '') // 已存在的 (N源) 后缀 → 去掉后重填
+        .replace(/\s*\d{2}-\d{2}\s+\d{2}:\d{2}\s*$/, '') // 旧版「清理后(…) MM-DD HH:MM」的时间戳
+        .replace(/^清理后\s*/, '') // 旧版前缀
+        .trim() || '订阅';
+      const name = `${base}(${left}源)`;
+      if (cfg?.activeProfileId) {
+        await client.cfgUpdateProfileName({ id: cfg.activeProfileId, name });
+        setMergeMsg({ text: `已删除 ${failed.length} 个失败源；当前配置已更新为「${name}」（源数 ${left}，见上方「已保存配置」）`, kind: 'ok' });
+      } else {
+        const p = await client.cfgSaveAsProfile(name);
+        setMergeMsg({ text: `已删除 ${failed.length} 个失败源；剩余 ${left} 个源已保存为配置「${p.name}」并切换到它（见上方「已保存配置」）`, kind: 'ok' });
+      }
     }
     setAudit(null);
     await refresh();
@@ -1205,6 +1290,77 @@ export default function ConfigPage() {
         )}
         </div>
       </details>
+
+      {/* 2b) 直播线路（★ 2026-10-14 用户要求）：导入的 TXT / M3U 直播源在此可改名 / 删除 */}
+      <details className="card" id="cfg-lives" open style={{ padding: 12, marginBottom: 16 }}>
+        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+          直播线路（{(cfg?.lives ?? []).length}）
+        </summary>
+        <div style={{ marginTop: 10 }}>
+          {(cfg?.lives ?? []).length === 0 ? (
+            <div className="empty" style={{ padding: 12 }}>尚无直播线路，可点上方「导入直播源（TXT / M3U）」添加</div>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ color: 'var(--text-dim)', textAlign: 'left' }}>
+                  <th style={{ padding: 6, borderBottom: '1px solid var(--border)', width: 36, textAlign: 'center' }}>当前</th>
+                  <th style={{ padding: 6, borderBottom: '1px solid var(--border)' }}>名称</th>
+                  <th style={{ padding: 6, borderBottom: '1px solid var(--border)' }}>地址</th>
+                  <th style={{ padding: 6, borderBottom: '1px solid var(--border)', width: 130 }}>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(cfg?.lives ?? []).map((l, i) => {
+                  const isActive = i === (cfg?.ui.activeLiveIndex ?? 0);
+                  const editing = liveEditIdx === i;
+                  return (
+                    <tr
+                      key={i}
+                      onClick={() => { if (!editing) void client.cfgSetActiveLive(i).then(refresh).catch((e) => setErr((e as Error).message)); }}
+                      style={{ cursor: editing ? 'default' : 'pointer', background: isActive && !editing ? 'var(--bg-elev2)' : undefined }}
+                    >
+                      <td style={{ padding: 6, borderBottom: '1px solid var(--border)', textAlign: 'center', color: 'var(--accent)' }}>{isActive ? '●' : '○'}</td>
+                      <td style={{ padding: 6, borderBottom: '1px solid var(--border)' }}>
+                        {editing ? (
+                          <input
+                            autoFocus
+                            style={{ width: 180, fontSize: 12 }}
+                            value={liveEditName}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => setLiveEditName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void saveLiveName(i);
+                              if (e.key === 'Escape') { setLiveEditIdx(null); setLiveEditName(''); }
+                            }}
+                          />
+                        ) : (l.name || `线路${i + 1}`)}
+                      </td>
+                      <td style={{ padding: 6, borderBottom: '1px solid var(--border)', color: 'var(--text-dim)', maxWidth: 320, wordBreak: 'break-all' }}>{l.url || l.api}</td>
+                      <td style={{ padding: 6, borderBottom: '1px solid var(--border)' }} onClick={(e) => e.stopPropagation()}>
+                        {editing ? (
+                          <>
+                            <button className="linkbtn" onClick={() => void saveLiveName(i)}>确定</button>
+                            <button className="linkbtn" onClick={() => { setLiveEditIdx(null); setLiveEditName(''); }}>取消</button>
+                          </>
+                        ) : (
+                          <>
+                            <button className="linkbtn" title="重命名该直播线路" onClick={() => { setLiveEditIdx(i); setLiveEditName(l.name || `线路${i + 1}`); }}>改名</button>
+                            <button className="linkbtn danger" title="删除该直播线路" onClick={() => void delLive(i, l.name)}>删除</button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+            点某行可把它设为直播页当前线路；「删除」只从应用线路列表移除，不改动你导入的原始文件。
+          </div>
+        </div>
+      </details>
+
 {/* 4) 最近导入诊断表 */}
       {report && report.items.length > 0 && (
         <div style={{ marginBottom: 16 }}>
@@ -2053,6 +2209,49 @@ export default function ConfigPage() {
             <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
               <button disabled={busy} onClick={() => setPackageNamePrompt(null)}>取消</button>
               <button className="primary" disabled={busy || !packageNamePrompt.name.trim()} onClick={() => void confirmPackageName()}>
+                {busy ? '导入中…' : '确认导入'}
+              </button>
+            </div>
+          </div>
+        </dialog>
+      )}
+
+      {/* ★ 2026-10-14（用户要求）：导入 TXT / M3U 直播源时的**单独命名弹框**（对齐本地包命名） */}
+      {liveNamePrompt && (
+        <dialog
+          ref={liveNameDialogRef}
+          aria-modal="true"
+          aria-labelledby="local-live-name-title"
+          onCancel={(e) => {
+            e.preventDefault();
+            if (!busy) setLiveNamePrompt(null);
+          }}
+          style={{
+            width: 'min(460px, calc(100% - 40px))', padding: 0,
+            border: '1px solid var(--border)', borderRadius: 12,
+            background: 'var(--bg-elev2)', color: 'var(--text)',
+            boxShadow: '0 12px 40px rgba(0,0,0,.35)',
+          }}
+        >
+          <div className="card" style={{ padding: 18, margin: 0 }}>
+            <div id="local-live-name-title" style={{ fontWeight: 600, marginBottom: 8 }}>命名本地直播源</div>
+            <div className="muted" style={{ fontSize: 12, lineHeight: 1.6, marginBottom: 12 }}>
+              已选好 TXT / M3U 直播源文件；请给这条直播线路起个名字（默认取原始文件名）。原始文件不会被修改。
+            </div>
+            <input
+              autoFocus
+              value={liveNamePrompt.name}
+              disabled={busy}
+              aria-label="直播线路名称"
+              placeholder="例如：我的直播源"
+              onChange={(e) => { setErr(''); setLiveNamePrompt({ ...liveNamePrompt, name: e.target.value }); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') void confirmLiveName(); }}
+              style={{ width: '100%', boxSizing: 'border-box', marginBottom: 14 }}
+            />
+            {err && <div role="alert" className="err" style={{ marginBottom: 12 }}>{err}</div>}
+            <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+              <button disabled={busy} onClick={() => setLiveNamePrompt(null)}>取消</button>
+              <button className="primary" disabled={busy || !liveNamePrompt.name.trim()} onClick={() => void confirmLiveName()}>
                 {busy ? '导入中…' : '确认导入'}
               </button>
             </div>

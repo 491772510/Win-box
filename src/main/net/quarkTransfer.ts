@@ -16,6 +16,7 @@
 import type { Logger } from '../../shared/types';
 import { diagTimer, logPlayDiag, redactUrl, shortHash } from '../util/playDiag';
 import { mergeSetCookies } from './cookieMerge';
+import { parseDriveDescriptor, descriptorField } from './driveDescriptor';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch';
 const REF = 'https://pan.quark.cn/';
@@ -759,6 +760,15 @@ export function isQuarkSharePlay(id: string, flag = ''): boolean {
 export function extractQuarkShare(text: string, flag = ''): { sId: string; passcode: string } | null {
   const compound = extractCompoundPanEpisode(text);
   if (compound && /^(?:quark|夸克)/i.test(flag)) return { sId: compound.shareId, passcode: '' };
+  // ★ 2026-10-14：`quark@<base64(JSON)>` 描述符（盘搜/免转存家族）→ 直接取 shareId(=pwd_id)。
+  //   走既有 quarkTransfer 免转存通道（不再把 id 原样丢给蜘蛛而必报「未登录」）。
+  {
+    const desc = parseDriveDescriptor(text);
+    if (desc && desc.provider === 'quark') {
+      const sId = descriptorField(desc.data, 'shareId', 'pwdId', 'sId');
+      if (sId) return { sId, passcode: String(desc.data.passcode || '') };
+    }
+  }
   try {
     const obj = JSON.parse(text);
     // sId 是 UC/夸克共用字段；已明确其他提供商时不能仅凭 sId 误走夸克。
@@ -801,6 +811,14 @@ export function extractCompoundPanEpisode(id: string): { name: string; fid: stri
 
 export function extractEpisodeFid(id: string): string {
   if (!id) return '';
+  // ★ 2026-10-14：`<prov>@<base64(JSON)>` 描述符 → 直接取 fileId（免转存要按 fid 精确命中文件）
+  {
+    const desc = parseDriveDescriptor(id);
+    if (desc) {
+      const f = descriptorField(desc.data, 'fileId', 'fid', 'fs_id', 'file_id');
+      if (f) return f;
+    }
+  }
   const compound = extractCompoundPanEpisode(id);
   if (compound) return compound.fid;
   // JSON：fid / vfid / file_id（字符串或数组首元素）
@@ -833,6 +851,12 @@ export function extractEpisodeName(id: string): string {
   if (!id) return '';
   const compound = extractCompoundPanEpisode(id);
   if (compound) return compound.name;
+  // ★ 2026-10-14：描述符（`<prov>@<b64>` 与嵌套信封）里的 name（内层 e / 外层 d 已归一）优先
+  {
+    const desc = parseDriveDescriptor(id);
+    const n = desc ? String(desc.data.name || '').trim() : '';
+    if (n) return n;
+  }
   // 值里可能含转义引号（JSON 字符串）→ 用 `(?:[^"\\]|\\.)` 逐字符匹配
   const V = '((?:[^"\\\\]|\\\\.){1,120})';
   const pats = [

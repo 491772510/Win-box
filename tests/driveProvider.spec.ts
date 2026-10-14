@@ -1,6 +1,6 @@
 // tests/driveProvider.spec.ts — 网盘播放 URL → provider 关联（cookie 型网盘）
 import { describe, it, expect } from 'vitest';
-import { matchDriveCookieProvider, wrapPlayUrl, driveUrlHost, wrapImageUrlForRelay, driveBindProviderFromText, looksLikeDriveBindFailure } from '../src/shared/driveProvider';
+import { matchDriveCookieProvider, wrapPlayUrl, driveUrlHost, wrapImageUrlForRelay, driveBindProviderFromText, looksLikeDriveBindFailure, driveProviderKeyFromHint } from '../src/shared/driveProvider';
 
 // ★ 2026-09-23：源封面防盗链/DNS 污染兜底 —— 源图经本地 /img 中继（DoH + Referer 重试链）
 describe('wrapImageUrlForRelay', () => {
@@ -90,5 +90,31 @@ describe('driveBindProviderFromText / looksLikeDriveBindFailure — 登录提示
   it('looksLikeDriveBindFailure 现在也认中文网盘名的登录提示（旧正则只看 网盘/drive/quark/ali/115/pan）', () => {
     expect(looksLikeDriveBindFailure('还未登录百度账号,请前往【配置中心】登录')).toBe(true);
     expect(looksLikeDriveBindFailure('普通站点 404')).toBe(false);
+  });
+
+  it('★ 2026-10-14：泛化「网盘授权」文案也算（不含网盘名），由调用方用该源 provider 补位', () => {
+    expect(looksLikeDriveBindFailure('请先完成网盘授权')).toBe(true);
+    expect(driveBindProviderFromText('请先完成网盘授权')).toBeNull(); // 无网盘名 → 需 SpiderHost 用自己的 map 补位
+  });
+});
+
+// ★ 2026-10-14（日志 app-2026-10-13.log）：泛化授权文案「请先完成网盘授权」不含网盘名 →
+//   driveBindProviderFromText 返回 null → 用 detail() 学到的该源 provider 补位
+describe('driveProviderKeyFromHint — 命中词（中文标签/键）→ provider 键', () => {
+  it('中文标签与英文键都归一', () => {
+    expect(driveProviderKeyFromHint('夸克')).toBe('quark');
+    expect(driveProviderKeyFromHint('quark')).toBe('quark');
+    expect(driveProviderKeyFromHint('百度')).toBe('baidu');
+    expect(driveProviderKeyFromHint('百度盘')).toBe('baidu');
+    expect(driveProviderKeyFromHint('uc')).toBe('uc');
+    expect(driveProviderKeyFromHint('115')).toBe('115');
+    expect(driveProviderKeyFromHint('阿里云盘')).toBe('ali');
+  });
+
+  it('泛化词 / 未收录 → null（不误判）', () => {
+    expect(driveProviderKeyFromHint('网盘')).toBeNull();
+    expect(driveProviderKeyFromHint('迅雷')).toBeNull();
+    expect(driveProviderKeyFromHint('')).toBeNull();
+    expect(driveProviderKeyFromHint(null)).toBeNull();
   });
 });

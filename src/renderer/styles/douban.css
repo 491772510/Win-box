@@ -176,16 +176,18 @@
 :root[data-theme='douban'] .tb-btn.tb-pin-on { color: var(--accent); background: var(--accent-soft); }
 :root[data-theme='douban'] .tb-btn.tb-pin-on:hover { color: var(--accent); background: rgba(46, 150, 41, .2); }
 
-/* ★ 播放器窗口（`pvwin`）整窗深色：观看时不要浅色面板（详情窗口同用 .app.pwin，但保持浅色页面） */
+/* ★ 2026-10-14（用户要求）：大豆皮肤里**播放器窗口的边框应为白色而非黑色** ——
+   仅针对独立播放器窗口（`.app.pwin.pvwin`，含标题栏/小窗条/窗口壳）；
+   视频舞台 `.vplayer` 仍保持深色（观看时需要）；详情窗口同用 .app.pwin 但保持浅色页面。 */
 :root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin,
-:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .main { background: #000; }
-:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .titlebar { background: #0F0F13; border-bottom: none; }
-:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .tb-title { color: #ECECF2; }
-:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .tb-btn { color: #9C99A8; }
-:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .tb-btn:hover { background: rgba(255, 255, 255, .14); color: #fff; }
+:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .main { background: #fff; }
+:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .titlebar { background: #fff; border-bottom: 1px solid var(--border-soft); }
+:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .tb-title { color: var(--text); }
+:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .tb-btn { color: var(--text-dim); }
+:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .tb-btn:hover { background: var(--accent-soft); color: var(--text); }
 :root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .tb-btn.tb-close:hover { background: #E5484D; color: #fff; }
-:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .tb-btn.tb-pin-on { color: var(--accent-2); background: rgba(255, 255, 255, .16); }
-:root[data-theme='douban'] .mini-strip { background: rgba(15, 15, 19, .6); color: #C9C6D2; }
+:root[data-theme='douban']:not([data-mpv]) .app.pwin.pvwin .tb-btn.tb-pin-on { color: var(--accent); background: var(--accent-soft); }
+:root[data-theme='douban'] .mini-strip { background: rgba(252, 253, 250, .92); color: var(--text-dim); }
 /* mpv 内核：标题栏/小窗条改浮层（global.css 已给深色渐变），此处保证字色仍是浅色 */
 :root[data-theme='douban'][data-mpv] .app.pwin.pvwin .tb-title { color: #F2F2F7; }
 :root[data-theme='douban'][data-mpv] .app.pwin.pvwin .tb-btn { color: #C9C6D2; }

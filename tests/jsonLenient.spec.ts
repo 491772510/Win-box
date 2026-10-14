@@ -5,7 +5,7 @@
 // —— 同一份订阅安卓能导入、桌面报「配置不是合法 JSON 对象」。
 // 实测：https://700sjro44343.vicp.fun/eggp/0211/tv.json 剥注释后仍挂在 `"",\n ],` 上。
 import { describe, it, expect } from 'vitest';
-import { parseJsonLenient, stripTrailingCommas, stripJsonComments } from '../src/engine/util/json';
+import { parseJsonLenient, stripTrailingCommas, stripJsonComments, quoteUnquotedKeys } from '../src/engine/util/json';
 
 describe('stripTrailingCommas', () => {
   it('数组/对象尾随逗号被去掉（含空白与换行）', () => {
@@ -43,5 +43,38 @@ describe('parseJsonLenient', () => {
   it('真正损坏的 JSON 仍抛错（不掩盖语法错误）', () => {
     expect(() => parseJsonLenient('{"a": }')).toThrow();
     expect(() => parseJsonLenient('not json at all')).toThrow();
+  });
+});
+
+// ★ 2026-10-14（用户报「肥猫订阅导入失败」）：实测 `http://肥猫.net/tv` 里站源写成 JS 对象字面量风格
+//   （键名 `ext` 裸写：`"api":"csp_AppDrama",\n ext: {…}`）→ JSON.parse 报
+//   `Expected double-quoted property name in JSON at position 2795`。安卓 org.json 能容忍。
+describe('quoteUnquotedKeys（裸键名兜底）', () => {
+  it('裸键名补引号；真实形态（裸 ext + 注释 + 尾随逗号）可解析', () => {
+    const text = '{\n  "sites": [{"key":"a","api":"csp_AppDrama",\n    ext: {"host":"","publicKey":"x"}}],\n  //肥猫\n}';
+    expect(parseJsonLenient(text)).toEqual({
+      sites: [{ key: 'a', api: 'csp_AppDrama', ext: { host: '', publicKey: 'x' } }],
+    });
+  });
+
+  it('值不被误改（true/false/null/数字/已引号键）', () => {
+    expect(quoteUnquotedKeys('{"a":true,"b":false,"c":null,"d":123}')).toBe('{"a":true,"b":false,"c":null,"d":123}');
+    expect(quoteUnquotedKeys('{"a":"ext: {b:1}"}')).toBe('{"a":"ext: {b:1}"}'); // 字符串内不动
+  });
+
+  it('引号错位键名（`ext": {`）补正；且不吞掉字符串里的 `//` URL（肥猫实证 line 124/143）', () => {
+    const text = '{"sites":[{"key":"a","api":"csp_AppDrama",\n ext": {"pkg":"com.x","site":" https://1851089669.cdn.123clouddisk.com/az5.txt "}}]}';
+    const o = parseJsonLenient(text) as { sites: Array<{ api: string; ext: { pkg: string; site: string } }> };
+    expect(o.sites[0].api).toBe('csp_AppDrama');
+    // 关键：引号错位会让「先剥注释」的字符串状态错位而吃掉 URL —— 必须原样保留
+    expect(o.sites[0].ext.site).toBe(' https://1851089669.cdn.123clouddisk.com/az5.txt ');
+  });
+
+  it('合法 JSON 走严格分支、不做任何改写', () => {
+    expect(parseJsonLenient('{"a":{"b":1}}')).toEqual({ a: { b: 1 } });
+  });
+
+  it('补引号后仍非法的文本仍抛错', () => {
+    expect(() => parseJsonLenient('{ext: {a:1}, "b": }')).toThrow();
   });
 });

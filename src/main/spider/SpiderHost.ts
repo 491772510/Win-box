@@ -14,6 +14,8 @@ import { ucResolveShare, ucFileDelete, isUcSharePlay, extractUcShare } from '../
 // ★ 2026-09-30：百度分享取流（**只能转存** —— 免转存的 share/list 子目录接口已被百度关停；
 //   dlink 必须用网盘客户端 UA 拉，浏览器 UA 恒定 403 31326）
 import { baiduResolveShare, baiduResolveSharedFile, baiduFileDelete, isBaiduSharePlay, extractBaiduShare, extractBaiduSharedFile, extractBaiduInnerName, baiduDirectLinkByFsid, type BaiduSharedFile } from '../net/baiduTransfer';
+// ★ 2026-10-14：嵌套信封（`base64(JSON{a:<商>,b:<内层>})`，实测 wex 立播）——解出暂不支持的网盘商时给出明确提示
+import { unsupportedNestedProvider } from '../net/driveDescriptor';
 import { fileLogger } from '../util/logger';
 import { parseSiteConfig, parseSiteConfigWithBase, looksLikeSubscribeJson, type ParseResult } from '../../engine/config/ApiConfigParser';
 import { parseMultiRepo, isFetchedRepoUrl, repoDisplayName, pickRepoLine, splitRepoLine, type MultiRepo } from '../../engine/config/multiRepo';
@@ -50,6 +52,7 @@ import { safeStorageDriveCodec } from '../util/driveCodec';
 import {
   driveBindHintFromPlaySources,
   driveBindProviderFromText,
+  driveProviderKeyFromHint,
   driveProviderLabel,
   looksLikeDriveBindFailure,
   matchDriveCookieProvider,
@@ -325,6 +328,13 @@ export class SpiderHost {
   private driveBindKeys = new Set<string>();
   private driveBindStore!: JsonStore;
   /**
+   * ★ 2026-10-14：运行期学到的「该源用哪个网盘」provider（key → quark/uc/baidu/115/ali）。
+   *   用途：蜘蛛返回**不含网盘名**的泛化授权文案（实测 `请先完成网盘授权`）时补位，
+   *   走既有「已绑定 → 重置蜘蛛池重试一次」自愈分支（见 driveBindProviderForGenericAuth）。
+   *   来源：`detail()` 的 `driveBindHintFromPlaySources` 命中（归一）、或 `playInner` 真实产出网盘直链时。
+   */
+  private driveBindProviderByKey = new Map<string, string>();
+  /**
    * ★ 聚合搜索逐源进度回调（IPC 层注入）：每完成一个源推一条给渲染层 → 结果边搜边出。
    * 无回调（单测/CLI）时退化为「只在结束时返回完整报告」。
    */
@@ -467,6 +477,19 @@ export class SpiderHost {
   }
 
   /**
+   * ★ 2026-10-14（用户日志 `app-2026-10-13.log`）：蜘蛛对部分网盘线路返回**不含网盘名**的泛化授权文案
+   *   （实测 `请先完成网盘授权`，`ms≈10` 瞬时失败）。`driveBindProviderFromText` 只认带具体网盘名的文案
+   *   （`夸克`/`百度`/`UC`/`115`/`阿里`）→ 返回 null；于是既不进入 §C27 的「已绑定 → 重置蜘蛛池重试一次」
+   *   自愈分支，也只把裸文案原样上屏（用户不知道要绑/重登哪个网盘）。
+   *   这里用 `detail()` 阶段学到的该源 provider 补位；**仅在文案确实是「授权/登录」类时才启用**
+   *   （与 `driveBindProviderFromText` 同一前置门槛），避免误伤普通空结果。
+   */
+  private driveBindProviderForGenericAuth(message: string, key: string): string | null {
+    if (!/(授权|登录|扫码|cookie|token|未绑定|绑定)/i.test(message)) return null;
+    return this.driveBindProviderByKey.get(key) || null;
+  }
+
+  /**
    * ★ 2026-09-29 设置备份：导出宿主持有的设置与凭据（凭据为**明文**，口径见 shared/backup.ts）。
    * 播放偏好 / 代理 / 老板键不在宿主内，由 ipc 侧补齐后再组装成完整备份文件。
    */
@@ -596,6 +619,14 @@ export class SpiderHost {
   /** ★ 2026-09-30（用户要求）：追加/更新一条本地导入的直播源（TXT / M3U） */
   cfgAddLive(bean: LiveBean) {
     return this.manager.addLive(bean);
+  }
+  /** ★ 2026-10-14（用户要求）：删除某条直播线路（下标越界静默 no-op） */
+  cfgDeleteLive(index: number): void {
+    this.manager.deleteLive(index);
+  }
+  /** ★ 2026-10-14（用户要求）：重命名某条直播线路 */
+  cfgUpdateLiveName(index: number, name: string): void {
+    this.manager.updateLiveName(index, name);
   }
   cfgActiveProfileId(): string {
     return this.manager.activeProfileId();
@@ -1787,6 +1818,9 @@ export class SpiderHost {
       const hit = driveBindHintFromPlaySources(d?.flags, d ? Object.values(d.episodes || {}).flat().map((e) => e.url) : null);
       if (hit) {
         this.logger.i(`detect 详情播放源含网盘（${hit}）→ 记入绑定清单: ${key}`);
+        // ★ 2026-10-14：同时记住该源用的 provider（供泛化授权文案补位，见 driveBindProviderForGenericAuth）
+        const prov = driveProviderKeyFromHint(hit);
+        if (prov) this.driveBindProviderByKey.set(key, prov);
         this.markDriveBindNeeded(key);
       }
       return d;
@@ -2252,6 +2286,16 @@ export class SpiderHost {
   private async playInner(key: string, flag: string, id: string, retried = false): Promise<PlayResult> {
     const b = this.getSource(key);
     if (!b) throw new Error(`源不存在: ${key}`);
+    // ★ 2026-10-14（用户报 wex 立播「夸克原画」）：嵌套信封里若是桌面端**暂不支持**的网盘商
+    //   （thunder / 115 / ali…），原样丢给蜘蛛只会得到「加固壳内部蜘蛛未就绪」这类无关提示。
+    //   直接说明原因，避免用户反复重进该源。夸克 / UC / 百度仍走下方各自的原生通道。
+    const unsupportedDrive = unsupportedNestedProvider(id);
+    if (unsupportedDrive) {
+      return {
+        parse: 1, url: '', playUrl: '', flag, jx: 0,
+        message: `该线路使用「${unsupportedDrive}」网盘（桌面端暂不支持解链）——请换夸克 / 百度 / UC 线路再播`,
+      };
+    }
     // fty「优汐」与夸克共用 sId/fid 描述；明确 UC 上下文优先，不能误发到夸克。
     if (extractUcShare(id, flag) && !isUcSharePlay(id)) {
       const miss: string[] = [];
@@ -2564,7 +2608,9 @@ export class SpiderHost {
       //     （cookie 文件在它 init 之后才写入 / `%TEMP%` 被系统清理过 / 绑定前的实例仍被复用）；
       //     此时正确动作是「重置蜘蛛池并重试一次」而不是让用户去绑定（他会看到永远弹的绑定窗）。
       if (!r.url && r.message) {
-        const prov = driveBindProviderFromText(String(r.message));
+        const prov =
+          driveBindProviderFromText(String(r.message)) ||
+          this.driveBindProviderForGenericAuth(String(r.message), key);
         if (prov) {
           this.markDriveBindNeeded(key);
           const bound = !!String((this.driveList() as Record<string, string>)[prov] || '').trim();
@@ -2681,6 +2727,8 @@ export class SpiderHost {
         // ★ 2026-09-27：本源真实产出了网盘直链 ⇒ **确定需要网盘绑定** → 学会它。
         //   这样源主页的「网盘绑定」入口不依赖蜘蛛类名清单（摸鱼/fty 类名写法不同、
         //   同一只蜘蛛在不同订阅里 ext 也不同），换任何订阅、任何新蜘蛛都能覆盖。
+        // ★ 2026-10-14：同时记住该源的 provider（供泛化授权文案补位，见 driveBindProviderForGenericAuth）
+        this.driveBindProviderByKey.set(key, prov);
         this.markDriveBindNeeded(key);
         const tokens = this.driveList() as Record<string, string>;
         /**
@@ -2717,8 +2765,19 @@ export class SpiderHost {
       if (looksLikeDriveBindFailure(msg)) {
         this.markDriveBindNeeded(key);
         // ★ 2026-09-30：已绑定该网盘时不再引导「去绑定」（否则用户会以为绑定没生效）
-        const prov = driveBindProviderFromText(msg) || '';
+        // ★ 2026-10-14：泛化授权文案（如「请先完成网盘授权」）不含网盘名 → 用该源学到的 provider 补位，
+        //   否则 prov='' 会把「已绑定」误判成「未绑定」并错误引导用户去绑定。
+        const prov = driveBindProviderFromText(msg) || this.driveBindProviderForGenericAuth(msg, key) || '';
         const bound = !!String((this.driveList() as Record<string, string>)[prov] || '').trim();
+        // ★ 2026-10-14：与「返回空地址 + 需登录文案」同口径 —— 已绑定却抛授权错，说明是**常驻蜘蛛的旧状态**
+        //   （cookie 文件在它 init 之后才写入 / `%TEMP%` 被清理过 / 旧实例仍被复用）→ 补写 cookie 文件 +
+        //   重置蜘蛛池后**重试一次**（`retried` 防死循环），而不是直接判死。
+        if (bound && !retried) {
+          this.logger.w(`play: 蜘蛛抛网盘授权错但本地已绑定 → 重置蜘蛛池并重试一次: ${key} — ${msg.slice(0, 160)}`);
+          this.syncDriveFiles();
+          this.resetSpidersAfterDriveChange();
+          return this.playInner(key, flag, id, true);
+        }
         this.logger.w(`play 判定需要网盘 Cookie（已记入绑定清单${bound ? '；该网盘已绑定' : ''}）: ${key} — ${msg}`);
         return {
           url: '',

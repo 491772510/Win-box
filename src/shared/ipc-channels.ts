@@ -89,6 +89,10 @@ export const IPC = {
    * 选文件 → 校验形态 → 落 <userData>/local-live/<文件名> → 追加/更新 lives 线路（/file 路由供直播页加载）。
    */
   CFG_IMPORT_LIVE_LOCAL: 'cfg:importLiveLocal',
+  /** ★ 2026-10-14（用户要求）：删除某条直播线路（导入的 TXT/M3U 直播源可在配置页删除） */
+  CFG_DELETE_LIVE: 'cfg:deleteLive',
+  /** ★ 2026-10-14（用户要求）：重命名某条直播线路（导入后允许编辑名称） */
+  CFG_UPDATE_LIVE: 'cfg:updateLive',
   CFG_PROFILE_SAVE: 'cfg:profileSave',
   CFG_PROFILE_ACTIVATE: 'cfg:profileActivate',
   /**
