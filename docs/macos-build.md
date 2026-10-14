@@ -11,7 +11,11 @@
 ## 0. 先读这三句
 
 1. **macOS 版的打包只能在一台 Mac 上做。** Windows 上跑 `pnpm dist:mac` 必然失败（electron-builder 在 Windows 上无法生成 dmg / 无法调用 `codesign`）。
-2. **本仓库不自带任何第三方二进制**（mpv / ffmpeg / ffprobe / aria2c / java / python3 全部被 `.gitignore` 排除）。它们要么你自己 `brew install`，要么自己下载后放进 `resources/` 指定目录。放与不放都不影响构建成功，只影响运行时功能是否可用。
+2. **本仓库不自带任何第三方二进制**（mpv / ffmpeg / ffprobe / aria2c / java / python3，以及 `resources/jvm/` 下的
+   `stubs` `libs` `d2j` `shell-shim` `jre` 全部被 `.gitignore` 排除）。它们要么你自己 `brew install`，
+   要么自己下载后放进 `resources/` 指定目录，要么从主开发机搬（见 **§2.4**）。
+   放与不放都不影响构建成功，只影响运行时功能是否可用。
+   > 例外的只有一只：`resources/jvm/native-bridge/native-bridge.jar` 是**本项目自己的代码**，已随源码入库（见 **§2.3**）。
 3. **没有 Apple Developer 账号也能打包、也能自己用**，只是别人双击打开时会被系统拦截 —— 走第 8 节的「右键 → 打开」。
 
 ---
@@ -67,7 +71,7 @@ pnpm install
 | `ffmpeg` | `resources/ffmpeg/ffmpeg` | `brew install ffmpeg` 后 `cp $(which ffmpeg) resources/ffmpeg/ffmpeg` | 部分流媒体转封装与兼容播放不可用 |
 | `ffprobe` | `resources/ffmpeg/ffprobe` | 同上（与 ffmpeg 同源） | 探测时长/音轨失败 |
 | `aria2c` | `resources/aria2/aria2c` | `brew install aria2` 后 `cp $(which aria2c) resources/aria2/aria2c` | **磁力 / BT 播放直接不可用** |
-| `java` | `resources/jvm/jre/bin/java` | 下载 [Temurin JRE 21](https://adoptium.net/temurin/releases/)（选 macOS + aarch64/x64 + JRE），解压后把 `Contents/Home` 整个目录放到 `resources/jvm/jre/` | **所有 jar 蜘蛛不可用** |
+| `java` | `resources/jvm/jre/bin/java` | **在 mac 上用 Zulu 17.0.13 的 JDK 自建**：`node scripts/build-jre.mjs`（见 **§2.5**） | **所有 jar 蜘蛛不可用** |
 | `python3` | **不用放** | `brew install python@3.11` | py 蜘蛛不可用 |
 
 > 上表「放置路径」一列填的是**随包内置**的位置。注意它**不等于「一定会用到」**：
@@ -92,9 +96,11 @@ pnpm install
 > ```
 >
 > Intel Mac 把上面的安装命令同样跑一遍即可（`brew` 会自动选 x64 版本）。
-> JRE 需要手动下载：Adoptium 页面选 **macOS / aarch64（Apple Silicon）或 x64（Intel）/ JRE / 21**，下 `.tar.gz`，
-> 解压出一个 `jdk-21.jre/Contents/Home/...` 结构 —— 把 **`Contents/Home` 这一层**整体拷成 `resources/jvm/jre/`，
-> 最终存在 `resources/jvm/jre/bin/java`（或 `resources/jvm/jre/Contents/Home/bin/java`，两者都会被识别）。
+>
+> **JRE 不在上表里手动下载** —— 它是平台相关的 jlink 产物，必须在 mac 上自建，见 **§2.5**。
+> （本节早期版本曾建议下载 Temurin JRE 21 直接塞进 `resources/jvm/jre/`。那条路有两个隐患：
+> 大版本与项目对齐的 17 不一致；且 17.0.14+ / 21 起 JCE 会校验 provider 的 jar 签名，
+> 会拦掉 `AndroidKeyStore` 的注册 —— 属未验证的口子，故改为自建。）
 
 ### 2.2 ★ 探测顺序（到底用的是哪一个）
 
@@ -223,6 +229,121 @@ pnpm build:native-bridge
 > ⚠ **macOS 真机未验证**：unidbg 的 `.dylib` 能否被 `dlopen`（见 §10 的 **V9**）。
 > 若报 `Library not loaded` / `code signature invalid`，那是 Hardened Runtime 拦了未签名 dylib ——
 > 授权文件需要 `com.apple.security.cs.disable-library-validation`（见 §5）。
+
+### 2.4 ★ JVM 私有资产（`stubs` `libs` `d2j` `shell-shim`）—— 必须在 Mac 上从主开发机搬一次
+
+**这一节解决「Mac 上 jar 蜘蛛全废 / 加固壳源报 NPE」的绝大多数情况。先读它，再去翻源码。**
+
+jar 蜘蛛想在桌面跑起来，靠的是 `resources/jvm/` 下的一整套宿主环境。里面**大部分不入库**
+（`.gitignore` 明文排除），因为这些是逆向自第三方 app 的产物、版权属原作者、不接受开源分发：
+
+| 资产 | 作用 | 入库？ |
+| --- | --- | --- |
+| `stubs/stubs.jar` | 安卓桩 + `Spider` 基类 + `SpiderRunner`（JVM 子进程入口）；301 条目 / 297 个 class | ✗ |
+| `stubs/shell-shim.jar` | 影子 `DexNative`（加固壳的兜底入口）；整只 jar 只有 1 个 class | ✗ |
+| `libs/*.jar` | okhttp / okio / gson / jsoup / org.json / sqlite-jdbc / bcprov / slf4j / python-runner | ✗ |
+| `d2j/*.jar` | dex2jar 分发（把蜘蛛 jar 里的 `classes.dex` 转成 `.class`） | ✗ |
+| `shell-shim/real/<壳名>.jar` | 加固壳的**真实实现**（当前内置 `foni-spider` / `ftyshinidie` / `wexshinidie`） | ✗ |
+| `native-bridge/native-bridge.jar` | ARM `.so` 模拟桥（**本项目自己的代码**） | **✓ 已入库** |
+| `jre/` | JVM 运行时 | ✗ **且平台相关**（见 §2.5） |
+| `okhttp4-compat/` | okhttp4 参数序补丁 | ✗ 构建时现场生成 |
+
+所以在 Mac 上**刚 clone 完的仓库跑不了任何 jar 蜘蛛**，必须先搬一次上表前五行。
+
+#### 搬法：主开发机一条命令导出，Mac 一条命令导入
+
+在**主开发机（Windows）**的仓库根目录：
+
+```bash
+node scripts/export-jvm-assets.mjs --export
+# 产物：.tmp/jvm-assets/winbox-jvm-assets-<版本>-<时间>.tar.gz   约 45MB
+#       同目录另有 .sha256，控制台也会打印 sha256 值
+#（.tmp/ 已被 .gitignore 排除；想放别处：--export /path/to/dir）
+```
+
+把这个 `.tar.gz` 传到 Mac（AirDrop / U 盘 / scp 都行）。
+**⚠ 不要上传到任何公开网盘，也不要提交进 git** —— 包里是第三方私有资产，只供作者本人机器间搬运。
+
+在 **Mac 的仓库根目录**：
+
+```bash
+node scripts/export-jvm-assets.mjs --import ~/Downloads/winbox-jvm-assets-<版本>-<时间>.tar.gz
+```
+
+它会依次做三件事：
+
+1. **逐个比 sha256**（包坏了/传了一半 → 直接拒绝，绝不会写半个进去）；
+2. **落盘到 `resources/jvm/`**（已存在且内容一致的文件自动跳过 → 可重复执行；内容不同则默认拒绝覆盖，要覆盖加 `--force`）；
+3. **自动跑一次体检**（见下）。
+
+只想校验、不想写文件：加 `--dry-run`。
+
+#### 随时体检：`--doctor`
+
+```bash
+node scripts/export-jvm-assets.mjs --doctor
+```
+
+输出分三段，并对每个 ✗ 给出**可以直接复制粘贴的修复命令**；有致命项时退出码为 1。
+
+```
+[1] 搬运包覆盖的资产（缺了 → 用 --export/--import 从主开发机搬）
+  ✓ stubs/stubs.jar             329.8 KB  301 条目  class 61✓  安卓桩 + SpiderRunner
+  ✓ libs/                        22.7 MB  10 个 jar（必需 10/10 齐）
+  ✓ shell-shim/real/              5.2 MB  3 个：foni-spider, ftyshinidie, wexshinidie
+[2] 平台自备 / 生成物（本包不含，必须在目标机器上准备）
+  ✓ jre/  17.0.13  (Zulu17.54+21-CA)
+      ✓ 血统符合（17.0.13）
+      ✓ 模块：含 jdk.charsets + jdk.localedata（共 27 个模块）
+  ✓ native-bridge/native-bridge.jar  80.2 KB
+  · unidbg 运行时尚未下载（首次用含 .so 的壳源时自动下载，约 39MB）
+[3] 其他工具（仅供参考；口径见 §2.1-2.2，不影响本脚本结论）
+  ✓ ffmpeg    bundled=无   system=/opt/homebrew/bin/ffmpeg
+```
+
+**「Mac 上某个源跑不起来」时的建议顺序：先 `--doctor`，再去看日志。** 它比日志快，而且能区分
+「资产没搬 → 源的问题」和「源真的坏了」。
+
+### 2.5 随包 JRE（`resources/jvm/jre`）—— 必须在 Mac 上自建，且必须用 Zulu 17.0.13
+
+`jre/` 是 **jlink 裁剪产物、平台相关**：Windows 那份里是 `java.exe`，拷到 mac 上跑不了，
+所以它**不进搬运包**（§2.4），要在 Mac 上自己生成一次。
+
+```bash
+# ① 下 Zulu 17.0.13 的 **JDK**（不是 JRE —— jlink 与 jmods 只在 JDK 里）
+#    Apple Silicon（M 系列）：
+curl -LO https://cdn.azul.com/zulu/bin/zulu17.54.21-ca-jdk17.0.13-macosx_aarch64.tar.gz
+#    Intel Mac 换成： zulu17.54.21-ca-jdk17.0.13-macosx_x64.tar.gz
+mkdir -p ~/zulu-jdk17 && tar xzf zulu17.54.21-ca-jdk17.0.13-macosx_aarch64.tar.gz -C ~/zulu-jdk17
+
+# ② 找到解压出来的 JDK home（里面有 bin/ 和 jmods/）
+JDK="$(find ~/zulu-jdk17 -maxdepth 5 -type d -name Home -path '*Contents*' | head -1)"
+"$JDK/bin/java" -version          # 应显示 17.0.13 且带 Zulu
+
+# ③ 生成 resources/jvm/jre（先建到临时目录验证血统，通过后再落到正式目录）
+node scripts/build-jre.mjs --jdk "$JDK" --out /tmp/jre-test
+node scripts/build-jre.mjs --jdk "$JDK"          # ← 验证通过后再跑这一条
+
+# ④ 校验现有 JRE（真的 Charset.forName 一遍 + 真的注册一次 JCE provider）
+node scripts/build-jre.mjs --check
+```
+
+> ⚠ 第 ③ 步之所以先 `--out /tmp/jre-test`：`build-jre.mjs` 是**先删旧产物再 jlink**，
+> 万一血统不对（脚本末尾的 `verifyCharsets()` / `verifyJce()` 会把关并 exit 1），
+> 正式目录里那份能用的 JRE 已经被删掉了。先建到临时目录可避免这个来回。
+
+**★★ 血统红线：必须 Zulu 17.0.13。** 同样的下法换成 17.0.14+ 会引入两个更严重的回归：
+
+- `jdk.charsets` 缺失 → GB2312 / GBK / Big5 的站点（柠檬、天天…）在**静态初始化**阶段抛
+  `UnsupportedCharsetException`，整个源（首页/搜索/详情）全废；
+- JCE 拒绝注册 provider → 所有用 `AndroidKeyStore` 的源全灭。
+
+机理、以及「已经试过并且失败的四条死路」，见 `docs/jvm-notes.md`。
+
+> 想塞一个**现成** JRE 应急（不推荐）：把 macOS JDK/JRE 包里的 `Contents/Home` 那一层拷成
+> `resources/jvm/jre/`（`jre/bin/java` 与 `jre/Contents/Home/bin/java` 两种布局都会被识别）。
+> 但 17.0.14+ / 21 的血统问题未知 —— 拷完先跑 `node scripts/export-jvm-assets.mjs --doctor`，
+> 它的「模块」一行会告诉你 `jdk.charsets` / `jdk.localedata` 在不在。
 
 ---
 
@@ -489,6 +610,9 @@ xattr -cr /Applications/Win-Box.app
 | Xcode CLT 报 `xcode-select: error: tool 'notarytool' requires Xcode` | Xcode 版本过老 | `sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install`；或装 Xcode 15+ |
 | 某个加固壳源报「该源依赖安卓原生库（.so），桌面版无法加载（架构限制，非移植缺陷）」 | **多半不是架构问题**：原生桥没生效（jar 缺失 / unidbg 运行时未下载 / dylib 被 Hardened Runtime 拦） | 搜日志里的 `native-bridge`：有「准备失败」看冒号后的异常；有「原生桥实现缺失」说明 jar 不在（见 §2.3 重建）；报 `Library not loaded` 则是 §5 的签名/授权问题 |
 | `pnpm dist:mac` 报 `缺少 resources/jvm/native-bridge/native-bridge.jar` | jar 被误删（它已入库） | `git checkout -- resources/jvm/native-bridge/native-bridge.jar`，或按 §2.3 重建；确要出降级包加 `--allow-no-bridge` |
+| 加固壳源（BiliGuard / 摸鱼 / fty / wex…）报 `加固壳内部蜘蛛未就绪（原生解密未产出加载器）—— 已自动改用内置真实实现` | **那句话的后半句是无条件写死的**（`translateSpiderLog` 里的硬编码文案），**不代表兜底真的成功了**。常见真因：本机没有该壳的真实实现（`shell-shim/real/<壳名>.jar` 不在），或 `stubs/shell-shim.jar` 缺失 | ① `node scripts/export-jvm-assets.mjs --doctor`；② 日志搜 `检测到壳 jar（guard=…）`——后面那个名字就是它要找的 jar 名；③ 搜 `未找到 shell-shim.jar` |
+| jar 蜘蛛**全部**「不可用」，或日志报 `wrong version 61.0` | `resources/jvm/{stubs,libs,d2j,shell-shim}` 没从主开发机搬，或 JRE 缺失 | 按 **§2.4** 搬资产、按 **§2.5** 建 JRE；`--doctor` 会逐项点名并给出命令 |
+| 某些源报 `UnsupportedCharsetException: gb2312`（表现为「蜘蛛静态初始化失败」） | 随包 JRE 是 jlink 裁剪产物、且**没打 `jdk.charsets`** | `--doctor` 的「模块」一行会直接点出来；按 **§2.5** 用 Zulu 17.0.13 重建 |
 
 ---
 
@@ -503,10 +627,11 @@ xattr -cr /Applications/Win-Box.app
 | **V3** | Dock 行为 | 关掉所有窗口后点 Dock 图标是否恢复；`Cmd+Q` 后图标是否消失 | 见排查表 |
 | **V4** | 标题栏 mac 变体（左置红黄绿三点） | 每个窗口看一眼，尤其播放器窗的「小窗口 / 置顶」按钮位置 | 记下截图提 Issue |
 | **V5** | 字体栈（4 套主题：apple / bilibili / douban / netflix） | 在 Retina 屏上看中文是否过细/字形不一致 | 调 `src/renderer/styles/*.css` 的 font-family 顺序 |
-| **V6** | JVM / Python 蜘蛛 | 导入一个 jar 蜘蛛和一个 py 蜘蛛，看能不能出搜索结果 | 不可用时应走「该源不可用」的人话降级，不应崩溃 |
+| **V6** | JVM / Python 蜘蛛 | 先跑 `node scripts/export-jvm-assets.mjs --doctor` 确认资产齐了（§2.4），再导入一个 jar 蜘蛛和一个 py 蜘蛛，看能不能出搜索结果 | 不可用时应走「该源不可用」的人话降级，不应崩溃；资产缺失按 `--doctor` 的提示补 |
 | **V7** | Gatekeeper / 公证 | 用一台**从未装过**的干净 Mac 双击 dmg | 见第 7、8 节 |
 | **V8** | `Cmd+W` / `Cmd+Q` / `Cmd+,` 快捷键 | 逐个按一遍 | `Cmd+,` 应跳到配置页 |
 | **V9** | **原生桥（unidbg）真的能在 mac 上跑起来** | 导入一个含 `.so` 的加固壳源（摸鱼 / fty / wex），搜日志里的 `native-bridge`：出现「原生桥就绪」= 通；出现「准备失败」= 看异常 | 若是 `Library not loaded` / `code signature invalid` → Hardened Runtime 拦了未签名 dylib，按 §5 的 `disable-library-validation` 重签；若报「原生桥实现缺失」→ 见 §2.3 |
+| **V10** | **加固壳源的 shell-shim 兜底**（与 V9 是两条独立的路） | 导入一个加固壳源（如 BiliGuard），日志搜 `检测到壳 jar（guard=…）` | 后面若跟着 `但无内置真实实现: …` = Mac 上缺这只壳的真实实现，把主开发机的 `shell-shim/real/` 搬过来（§2.4）；报 `未找到 shell-shim.jar` = `stubs/shell-shim.jar` 缺失（同一个包里有） |
 
 ---
 
