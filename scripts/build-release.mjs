@@ -101,18 +101,25 @@ function verifyPackaged(pick, label) {
 //   「该源依赖安卓原生库（.so），桌面版无法加载（架构限制，非移植缺陷）」（见 JarSpiderBridge
 //   的 translateSpiderLog）。而这只 jar 曾经不入库，加上唯一的构建脚本 build.ps1 是 PowerShell，
 //   mac 上从零 clone 的仓库里就根本没有它 —— 这是 mac 适配里最隐蔽的一处缺口。
-//   Windows 主开发机历史上一直有它（本地构建产物），所以只在 mac 分支强制把关；
-//   确需出一个「无原生桥」的降级包时用 --allow-no-bridge 显式放行。
-if (target === 'mac' && !argv.includes('--allow-no-bridge')) {
+//
+// ★ 2026-10-15：把关从「只挂 mac 分支」提为**平台无关**。
+//   原先只查 mac 的理由是「Windows 主开发机历史上一直有它（本地构建产物）」——
+//   但自 c2ca033 起这只 jar 已随源码入库，那个理由不再成立；而 Windows 分支一旦本地误删
+//   就会**静默**打出一个「无原生桥」的包，用户拿到后所有加固壳源全废且毫无提示。
+//   现在两个平台都强制校验；确需出降级包时用 --allow-no-bridge 显式放行（行为对 mac 不变）。
+if (!argv.includes('--allow-no-bridge')) {
   const bridge = join(root, 'resources/jvm/native-bridge/native-bridge.jar');
   if (!existsSync(bridge)) {
-    console.error('缺少 resources/jvm/native-bridge/native-bridge.jar —— 缺了它，含 .so 的加固壳源在 macOS 上全部不可用（报「依赖安卓原生库」）。');
+    console.error(`缺少 resources/jvm/native-bridge/native-bridge.jar —— 缺了它，含 .so 的加固壳源在桌面端全部不可用（报「依赖安卓原生库」）。`);
+    console.error(`  · 打包目标：${target}`);
     console.error('  · 正常情况下该 jar 已随源码入库，先 git status 确认是不是被误删；');
     console.error('  · 需要重建时：node resources/jvm/native-bridge/build-native-bridge.mjs（或 pnpm build:native-bridge）');
     console.error('  · 确实要出「无原生桥」的降级包：加 --allow-no-bridge');
     process.exit(1);
   }
   console.log(`native bridge verified: ${bridge}`);
+} else {
+  console.warn('⚠ --allow-no-bridge：跳过原生桥校验，本包内所有含 .so 的加固壳源将不可用。');
 }
 
 verifyPackaged(support, 'Support artwork');

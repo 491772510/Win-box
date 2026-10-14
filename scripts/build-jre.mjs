@@ -63,8 +63,8 @@
 // 大版本必须是 17：`stubs.jar` 与 JRE 的 class 文件版本都是 61（Java 17），
 // 换成别的版本会出现 `class file has wrong version`。
 
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -95,9 +95,12 @@ const MODULES = [
   'java.net.http', 'java.scripting', 'java.security.jgss', 'java.transaction.xa',
   'java.sql', 'java.sql.rowset', 'java.xml.crypto', 'java.se',
   'jdk.charsets', // ★ 扩展字符集：GB2312 / GBK / GB18030 / Big5 / IBM 系列
-  'jdk.localedata', // ★ 区域数据：缺了它 Locale 只剩 5 个（系统 JDK 有 1017 个），
+  'jdk.localedata', // ★ 区域数据：缺了它 Locale 只剩 5 个（带上它 1017 个），
   //     中文日期/月份会退化成 `2026 Oct 13, Tue`。源若按中文日期解析会直接失败。
-  //     体积靠下面的 --include-locales 控制（全量 localedata 约 +22MB，只要中英两档约 +2MB）。
+  //     ⚠ 体积（2026-10-15 实测，别再照抄旧注释里那句「+22MB / +2MB」）：JRE 46MB → 96MB。
+  //     试过 `--include-locales=zh,en` 只降到 76MB（省 20MB），代价是 locale 从 1017 掉到 124、
+  //     并且会让下面 verifyCharsets() 的 MIN_LOCALES 守卫失去意义 —— 不值得，故**不裁剪**。
+  //     哪天真要压包体：在这里加 --include-locales，并同步下调 MIN_LOCALES（两者必须一起改）。
   'jdk.crypto.ec', 'jdk.crypto.cryptoki', 'jdk.unsupported', 'jdk.zipfs',
 ];
 
@@ -147,7 +150,11 @@ function verifyJce(javaHome) {
     rmSync(tmp, { recursive: true, force: true });
     return true;
   }
-  const r = spawnSync(join(javaHome, 'bin', exe('java')), ['-cp', `${tmp};${stubsJar}`, 'WinboxJceProbe'], { encoding: 'utf8' });
+  // ⚠ classpath 分隔符必须走 path.delimiter（win `;` / mac·linux `:`）。
+  //   这里曾硬编码 `;` —— 在 mac 上 `-cp "a;b"` 会被当成**一个**路径 → ClassNotFoundException
+  //   → 探针打不出 JCE-OK → verifyJce() 误判「血统红线」并 exit 1，等于把 mac 用户彻底
+  //   挡在「重建 JRE」之外（明明血统没问题）。注意 delimiter 是**字符串常量**、不是函数。
+  const r = spawnSync(join(javaHome, 'bin', exe('java')), ['-cp', [tmp, stubsJar].join(delimiter), 'WinboxJceProbe'], { encoding: 'utf8' });
   const txt = `${r.stdout}${r.stderr}`;
   rmSync(tmp, { recursive: true, force: true });
   if (!txt.includes('JCE-OK')) {
@@ -166,6 +173,19 @@ function verifyJce(javaHome) {
 // ---------------------------------------------------------------------------
 function isWin() { return process.platform === 'win32'; }
 const exe = (n) => (isWin() ? `${n}.exe` : n);
+
+/**
+ * 兼容两种 JRE 布局，返回可直接传给探针的 Java home：
+ *   · `<dir>/bin/java`                  —— jlink 直出（本脚本的产物）
+ *   · `<dir>/Contents/Home/bin/java`    —— macOS 上「拖一个 JDK/JRE bundle 进来」的形态
+ * 两种都不在则返回 null。产品侧 `JarSpiderBridge.javaExeCandidates()` 认同样的两种布局。
+ */
+function javaHomeOf(dir) {
+  if (existsSync(join(dir, 'bin', exe('java')))) return dir;
+  const macHome = join(dir, 'Contents', 'Home');
+  if (existsSync(join(macHome, 'bin', exe('java')))) return macHome;
+  return null;
+}
 
 function candidates() {
   const list = [];
@@ -269,13 +289,16 @@ function verifyCharsets(javaHome) {
 // 主流程
 // ---------------------------------------------------------------------------
 if (checkOnly) {
-  if (!existsSync(join(out, 'bin', exe('java')))) {
-    console.error(`✗ ${out} 里没有 java，先跑一次构建`);
+  const home = javaHomeOf(out);
+  if (!home) {
+    console.error(`✗ ${out} 里没有 java（找过 bin/java 与 Contents/Home/bin/java），先跑一次构建`);
     process.exit(1);
   }
-  console.log(`检查现有 JRE：${out}`);
-  const ok = verifyCharsets(out) && verifyJce(out);
-  process.exit(ok ? 0 : 1);
+  console.log(`检查现有 JRE：${home}`);
+  // 两个校验都要跑（别用 && 短路）：一次把「字符集 / 区域数据」与「JCE 血统」两条线都报出来
+  const okCharsets = verifyCharsets(home);
+  const okJce = verifyJce(home);
+  process.exit(okCharsets && okJce ? 0 : 1);
 }
 
 const tools = pickJdk();
@@ -286,19 +309,21 @@ if (!tools) {
 }
 console.log(`使用 JDK：${tools.home}`);
 
-if (existsSync(out)) {
-  console.log(`清理旧产物：${out}`);
-  rmSync(out, { recursive: true, force: true });
-}
+// ★ 2026-10-15：先建到旁边的临时目录，**校验全部通过后才替换正式目录**。
+//   旧实现是「先 rmSync(out) 再 jlink」—— 一旦血统不对（verifyJce 拦下并 exit 1），
+//   原来那份能用的 JRE 已经被删掉了，只能再弄一份 JDK 才能恢复（mac 上尤其疼）。
+//   用 `out.building` 同目录兄弟目录，保证 rename 是同卷操作（跨卷 rename 会失败）。
+const staging = `${out}.building`;
+if (existsSync(staging)) rmSync(staging, { recursive: true, force: true });
 
-console.log(`生成到：${out}`);
+console.log(`生成到（临时）：${staging}`);
 console.log(`模块（${MODULES.length} 个，含 jdk.charsets）`);
 const r = spawnSync(
   tools.jlink,
   [
     '--module-path', tools.jmods,
     '--add-modules', MODULES.join(','),
-    '--output', out,
+    '--output', staging,
     '--strip-debug', '--no-header-files', '--no-man-pages',
   ],
   { encoding: 'utf8' },
@@ -308,6 +333,35 @@ if (r.status !== 0) {
   process.exit(1);
 }
 
-if (!verifyCharsets(out)) process.exit(1);
-if (!verifyJce(out)) process.exit(1);
+// 校验跑在**临时产物**上；两个都要跑，一次把两条线都报出来
+const home = javaHomeOf(staging);
+const okCharsets = home ? verifyCharsets(home) : false;
+const okJce = home ? verifyJce(home) : false;
+if (!okCharsets || !okJce) {
+  rmSync(staging, { recursive: true, force: true });
+  console.error('✗ 血统校验未通过 —— 已丢弃临时产物，**正式目录原样保留**：');
+  console.error(`    保留的正式目录：${existsSync(out) ? out : '（原本就没有，这次没建成）'}`);
+  if (!okCharsets) console.error('  → 扩展字符集 / 区域数据缺失：换用 Zulu 17.0.13 的 JDK（见 docs/jvm-notes.md 的血统红线）');
+  if (!okJce) console.error('  → JCE 拒注册 provider：JDK 血统不对（17.0.14+ 会校验 provider 的 jar 签名）');
+  process.exit(1);
+}
+
+// 校验通过 → 原子替换：先把旧的挪到 `.old`，再落新的；中途失败就回滚
+if (existsSync(out)) {
+  const backup = `${out}.old`;
+  rmSync(backup, { recursive: true, force: true });
+  renameSync(out, backup);
+  try {
+    renameSync(staging, out);
+    rmSync(backup, { recursive: true, force: true });
+  } catch (e) {
+    renameSync(backup, out);
+    console.error(`✗ 替换 ${out} 失败，已回滚到原目录：${e.message}`);
+    console.error('  （多半是文件被占用：先关掉正在跑的 Win-Box / JVM 子进程再重试）');
+    process.exit(1);
+  }
+  console.log(`已替换旧产物：${out}`);
+} else {
+  renameSync(staging, out);
+}
 console.log(`✓ 完成：${out}\n  （该目录被 .gitignore 排除，不会进仓库；打包时由 electron-builder 带走）`);

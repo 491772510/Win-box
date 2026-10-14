@@ -69,10 +69,16 @@ jvm-bridge com.github.catvod.spider.Nmvod.homeContent 失败原因:
 - `java.base` **只带标准字符集**：UTF-8 / ISO-8859-1 / US-ASCII / UTF-16 等。
 - **GB2312 / GBK / GB18030 / Big5 在 `jdk.charsets` 模块里**，而它**不在 `java.se` 的传递依赖里**
   —— 所以 `jlink` 时**必须显式写进模块清单**，漏一个都不行。
-- 还有 **`jdk.localedata`**：缺了它，`Locale` 只剩 **5 个**（完整 JDK 有 **1017 个**），
+- 还有 **`jdk.localedata`**：缺了它，`Locale` 只剩 **5 个**（打上它 **1017 个**），
   中文日期会退化成 `2026 Oct 13, Tue`。**源若按中文日期解析会直接失败**。
-  体积可以控制：全量 `jdk.localedata` 约 **+22MB**，只要中英两档约 **+2MB**
-  （脚本注释里提到用 `--include-locales` 控制；**当前脚本未传该参数，等价于打全量**）。
+- **体积（2026-10-15 实测，别再引用早期那句「+22MB / +2MB」，那是错的）**：
+  随包 JRE **46MB → 96MB（+50MB）**。试过 `jlink --include-locales=zh,en`，只降到 **76MB**
+  （省 20MB），但 locale 数从 1017 掉到 124，且会让 `build-jre.mjs` 里 `verifyCharsets()` 的
+  `MIN_LOCALES`（=500）守卫失去意义 ⇒ **决定不裁剪**。哪天真要压包体，两者必须一起改。
+- ★ **2026-10-15 之前，随包那份 JRE 一直是漏的**：它的 `release` 里 `MODULES` 只有 25 个、既无
+  `jdk.charsets` 也无 `jdk.localedata` —— 即「脚本早就写对了模块清单，但**没人按它重建过**」。
+  这正是上面 §1.2 那个 gb2312 症状的现存原因。当天已用 Zulu 17.0.13 的 JDK 重建并校验通过
+  （gb2312 / gbk / gb18030 / big5 ✓、Locale 1017 ✓、JCE provider ✓）。
 
 > 记住这条因果链：**字符集只能在 `jlink` 阶段补齐**。运行时再想办法都补不上（见 §1.5）。
 
