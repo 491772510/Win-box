@@ -12,14 +12,6 @@ import { NullLogger } from '../src/engine/util/logger';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
-// ★ 2026-09-30 蜘蛛沙箱盘：jailSpawnCwd 在单测（VITEST）下恒为空串 → 这里固定成 V:\ 以便断言
-//   「JVM 子进程带 cwd / Python 子进程不带」这条把 `/data/…` 收进数据目录的关键接线。
-//   只覆盖 jailSpawnCwd，ensureJailDrive 仍是真实实现（VITEST 下返回空串 → argv 形状不变）。
-const JAIL_CWD = 'V:\\';
-vi.mock('../src/engine/util/jailDrive', async (orig) => ({
-  ...(await orig<typeof import('../src/engine/util/jailDrive')>()),
-  jailSpawnCwd: () => JAIL_CWD,
-}));
 
 /** 假子进程：只需 stdout/stderr EventEmitter + error/close 事件 */
 function fakeChild(): EventEmitter & { stdout: EventEmitter; stderr: EventEmitter } {
@@ -160,10 +152,10 @@ describe('JarSpiderBridge.call — spawn argv 强制 UTF-8（任务 A）', () =>
     await expect(p2).resolves.toBe('');
   });
 
-  // ★ 2026-09-30 蜘蛛沙箱盘：这是把第三方 jar 写的 `/data/…`（无盘符根路径）收进数据目录的
-  //   **决定性接线** —— 真机 A/B 实测只有子进程 cwd 能改变真实落点，`-Duser.dir` 只改路径串。
-  //   只给 JVM 子进程加；Python 源不经安卓路径，必须维持历史 cwd 行为。
-  it('JVM 子进程带 cwd=沙箱盘根；Python 等非 JVM 子进程不带 cwd', async () => {
+  // ★ 2026-10-14（用户指令「不允许给用户系统建盘符」）：曾经的「蜘蛛沙箱盘」用 `subst` 建 V:\ 虚拟盘 +
+  //   子进程 cwd=V:\ 来收容 `/data/…` 写入，会在用户机器上多出一个盘符 —— 该机制连同 cwd 覆盖已整条删除。
+  //   这里改为断言**不再有任何 cwd 覆盖**（JVM 与 Python 一视同仁，恢复历史行为）。
+  it('不再覆盖子进程 cwd（JVM 与 Python 均无 cwd 参数）', async () => {
     const { bridge, dir } = makeBridge();
     dirs.push(dir);
     const p = bridge.call([join(dir, 'a.jar')], 'X', 'm', []);
@@ -171,9 +163,8 @@ describe('JarSpiderBridge.call — spawn argv 强制 UTF-8（任务 A）', () =>
     child.stdout.emit('data', Buffer.from('[]'));
     child.emit('close', 0);
     await p;
-    expect((spawnMock.mock.calls[0][2] as { cwd?: string }).cwd).toBe(JAIL_CWD);
+    expect('cwd' in (spawnMock.mock.calls[0][2] as object)).toBe(false);
 
-    // 非 JVM（Python runner 走同一条 runSubprocess）→ 不得改 cwd
     const rs = (bridge as unknown as {
       runSubprocess: (exe: string, argv: string[], cls: string, method: string) => Promise<string>;
     }).runSubprocess.call(bridge, join(dir, 'py', 'python.exe'), ['r.py'], 'X', 'm');

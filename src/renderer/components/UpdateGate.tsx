@@ -152,23 +152,25 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
             </div>
           )}
 
+          {/* ★ 2026-10-14：`flex: 0`（= `0 1 0%`）会把按钮压到 min-content（中文 1 字宽）并把文字
+              折成两行，看起来像竖排按钮；与本仓其它按钮统一改为 `0 0 auto`（按内容取宽、不收缩）。 */}
           <div className="row upd-actions">
             {!busy && !error && (
               <>
-                <button autoFocus style={{ flex: 0 }} onClick={() => setDismissed(true)}>
+                <button autoFocus style={{ flex: '0 0 auto' }} onClick={() => setDismissed(true)}>
                   暂不更新
                 </button>
-                <button className="primary" style={{ flex: 0 }} onClick={() => void downloadAndInstall()}>
+                <button className="primary" style={{ flex: '0 0 auto' }} onClick={() => void downloadAndInstall()}>
                   立即更新
                 </button>
               </>
             )}
             {error && (
               <>
-                <button style={{ flex: 0 }} onClick={() => setDismissed(true)}>
+                <button style={{ flex: '0 0 auto' }} onClick={() => setDismissed(true)}>
                   暂不更新
                 </button>
-                <button className="primary" style={{ flex: 0 }} disabled={busy} onClick={() => void downloadAndInstall()}>
+                <button className="primary" style={{ flex: '0 0 auto' }} disabled={busy} onClick={() => void downloadAndInstall()}>
                   重试
                 </button>
               </>

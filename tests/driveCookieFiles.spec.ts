@@ -20,6 +20,10 @@ import {
   writeWexCookieFile,
   removeWexCookieFile,
   syncWexCookieFiles,
+  WEX_PREFS_NAME,
+  wexPrefsSeedPath,
+  syncWexPrefsSeed,
+  UCTV_PREF_KEYS,
 } from '../src/main/spider/driveCookieFiles';
 
 let root = '';
@@ -148,5 +152,49 @@ describe('driveCookieFiles — wex 系（玩偶/花卷/木偶）cookie 文件同
     expect(existsSync(wexCookiePath('uc', sandbox))).toBe(true);
     syncWexCookieFiles({}, sandbox);
     expect(existsSync(wexCookiePath('uc', sandbox))).toBe(false);
+  });
+});
+
+describe('driveCookieFiles — wex SharedPreferences 种子（第四通道 + UC TV Token，2026-10-14）', () => {
+  const readSeed = (sandbox: string): Record<string, string> => {
+    const path = wexPrefsSeedPath(sandbox);
+    const kv: Record<string, string> = {};
+    for (const line of readFileSync(path, 'utf-8').trim().split('\n')) {
+      const [name, key, value] = line.split('\t');
+      expect(name).toBe(WEX_PREFS_NAME); // 每行都是「表名 \t 键 \t 值」
+      kv[key] = value;
+    }
+    return kv;
+  };
+
+  it('写入 cookie 三键 + 环境键；ucTv 非空时追加 Wex_ucpan_token / Wex_ucpan_device_id', () => {
+    const sandbox = spiderSandboxDir(root);
+    const tvJson = '{"code":200,"data":{"access_token":"AT","refresh_token":"RT"}}';
+    const p = syncWexPrefsSeed({ uc: 'UC_CK', quark: 'Q_CK', baidu: 'B_CK' }, sandbox, { deviceId: 'dev1', token: tvJson });
+    expect(p).toBe(wexPrefsSeedPath(sandbox));
+    const kv = readSeed(sandbox);
+    expect(kv['Wex_ucpan_cookie']).toBe('UC_CK');
+    expect(kv['Wex_quark_cookie']).toBe('Q_CK');
+    expect(kv['Wex_baidu_cookie']).toBe('B_CK');
+    expect(kv[UCTV_PREF_KEYS.token]).toBe(tvJson);
+    expect(kv[UCTV_PREF_KEYS.deviceId]).toBe('dev1');
+    expect(kv['pan.thread_proxy_mode']).toBe('java');
+  });
+
+  it('ucTv 为空/无值时这两键消失（重写种子即生效，避免残留旧 token）', () => {
+    const sandbox = spiderSandboxDir(root);
+    syncWexPrefsSeed({ uc: 'UC_CK' }, sandbox, { deviceId: 'dev1', token: 'TOK' });
+    expect(readSeed(sandbox)['Wex_ucpan_token']).toBe('TOK');
+    syncWexPrefsSeed({ uc: 'UC_CK' }, sandbox);
+    expect(readSeed(sandbox)['Wex_ucpan_token']).toBeUndefined();
+  });
+
+  it('值里的 \\r\\n\\t 会被剔除（种子是按行/制表符切分的纯文本）', () => {
+    const sandbox = spiderSandboxDir(root);
+    syncWexPrefsSeed({ uc: 'U\nC' }, sandbox, { deviceId: 'd\te', token: '{"a":\n1}' });
+    const kv = readSeed(sandbox);
+    expect(kv['Wex_ucpan_cookie']).toBe('UC');
+    expect(kv['Wex_ucpan_token']).toBe('{"a":1}');
+    expect(kv['Wex_ucpan_device_id']).toBe('de');
   });
 });

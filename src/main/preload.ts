@@ -184,6 +184,10 @@ const api = {
     qrCreate: (provider?: string) => invoke(IPC.DRIVE_QR_CREATE, provider),
     qrPoll: (provider: string, sid: string) => invoke(IPC.DRIVE_QR_POLL, provider, sid),
     webLogin: (provider: string) => invoke(IPC.DRIVE_WEB_LOGIN, provider),
+    ucTvStatus: () => invoke(IPC.DRIVE_UC_TV_STATUS),
+    ucTvQrCreate: () => invoke(IPC.DRIVE_UC_TV_QR_CREATE),
+    ucTvQrPoll: () => invoke(IPC.DRIVE_UC_TV_QR_POLL),
+    ucTvRemove: () => invoke(IPC.DRIVE_UC_TV_REMOVE),
   },
   win: {
     minimize: () => invoke(IPC.WIN_MINIMIZE),

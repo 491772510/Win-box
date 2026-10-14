@@ -1066,7 +1066,7 @@ export default function ConfigPage() {
             <thead>
               <tr style={{ color: 'var(--text-dim)', textAlign: 'left' }}>
                 <th style={{ padding: 6, borderBottom: '1px solid var(--border)', width: 36, textAlign: 'center' }}>
-                  <input ref={selectAllSourcesRef} type="checkbox" aria-label="全选源" title="全选 / 取消全选" checked={allSourcesSelected} disabled={sourceDeleteBusy}
+                  <input ref={selectAllSourcesRef} type="checkbox" className="sel-box" aria-label="全选源" title="全选 / 取消全选" checked={allSourcesSelected} disabled={sourceDeleteBusy}
                     onChange={e => setSourcePick(e.target.checked ? new Set(sources.map(s => s.key)) : new Set())} />
                 </th>
                 <th style={{ padding: 6, borderBottom: '1px solid var(--border)', width: 36 }}>当前</th>
@@ -1093,7 +1093,7 @@ export default function ConfigPage() {
                     }}
                   >
                     <td style={{ padding: 6, borderBottom: '1px solid var(--border)', textAlign: 'center' }} onClick={e => e.stopPropagation()}>
-                      <input type="checkbox" aria-label={`选择源 ${s.name || s.key}`} checked={sourcePick.has(s.key)} disabled={sourceDeleteBusy} onChange={() => toggleSourcePick(s.key)} />
+                      <input type="checkbox" className="sel-box" aria-label={`选择源 ${s.name || s.key}`} checked={sourcePick.has(s.key)} disabled={sourceDeleteBusy} onChange={() => toggleSourcePick(s.key)} />
                     </td>
                     <td style={{ padding: 6, borderBottom: '1px solid var(--border)', textAlign: 'center', color: 'var(--accent)' }}>
                       {isActive ? '●' : '○'}

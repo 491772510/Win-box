@@ -19,7 +19,7 @@
 //   与之并列的 fty 系（Cloud_*Guard）读的是 ext["Cloud-drive"] 指向的配置文件（quarkCookie/ucCookie…），
 //   由 SpiderHost.syncCloudDriveConfig 负责——两者互补，缺一都会「详情/取流为空」。
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 /** provider（DriveStore 键，小写）→ Pizazz 系 cookie 文件名（名单取自 jar 内字符串引用） */
@@ -179,6 +179,95 @@ export function syncWexCookieFiles(tokens: Record<string, string>, sandboxDir: s
     }
   }
   return written;
+}
+
+// ---------------------------------------------------------------------------
+// ★ 2026-10-14 wex 系「SharedPreferences 通道」——第四通道（根因修复，见 MEMORY 一〇八）
+//
+// 反编译实证：wex 族（玩偶/虎斑/爱看…）的 `Wex_*` 键存在 **Android SharedPreferences
+//   `NewWexFnw_preferences`** 里（`merge/x0/e.H()` = `InitOrigin.context().getSharedPreferences(...)`，
+//   `x0/e.I(k, d)` = `H().getString(k, d)`）。
+// 而桌面桩的 SharedPreferences 是**纯内存**实现（从不落盘）⇒ Node 写任何文件都到不了它。
+// 修法 = `prefs-shim` 影子类（见 src/engine/spider/prefsShim.ts）：它排在 -cp 最前盖住原桩，
+//   并从 `<Context.getBaseDir()>/shared_prefs/seed.txt` 读种子，每行 `表名 \t 键 \t 值`。
+// 因此本文件是第四通道：既写文件通道（前三通道），也写这份 SharedPreferences 种子。
+// ---------------------------------------------------------------------------
+
+/** wex 系 SharedPreferences 表名（反编译实证；与 prefsShim.WEX_PREFS_NAME 同值，勿各自手拼） */
+export const WEX_PREFS_NAME = 'NewWexFnw_preferences';
+
+/** provider（DriveStore 小写键）→ `Wex_*` 配置键（名单取自 jar 常量池） */
+export const WEX_PREF_KEYS: Record<string, string> = {
+  quark: 'Wex_quark_cookie',
+  uc: 'Wex_ucpan_cookie',
+  baidu: 'Wex_baidu_cookie',
+};
+
+/**
+ * 与凭据无关的**桌面环境键**（恒写入）：该族的默认多线程方式是 Go（`GoProxy.startServer`），
+ * 而桌面端**没有 Go 代理**（初始化阶段被跳过）⇒ 走 Go 的原画线路必报
+ * `[baidu](threadProxy) Go多线程启动失败`。这里强制切到 Java 多线程（配置中心里的
+ * 「多线程代理 = Java多线程」等价物），是桌面端唯一能走通的模式。
+ */
+export const WEX_PREF_ENV: Record<string, string> = {
+  'pan.thread_proxy_mode': 'java',
+};
+
+/**
+ * ★ 2026-10-14 UC TV Token（非会员 UC 原画）：wex 族的 UC 取流在 `MyPan$UcMineProvider.player()`
+ *   按 `member_type` 分流——NORMAL（非高会）时读的是 **`Wex_ucpan_token`**（OAuth token 对 JSON），
+ *   不是 cookie；缺它即报「非高会需要配置 UC TV Token，请到配置中心扫码获取」。
+ *   `Wex_ucpan_device_id` 是配套的设备指纹（jar 缺省会自造 `md5(当前毫秒)`，我们写入保持一致）。
+ *   键名取自 jar 常量池（见 `ucTvToken.ts` 头注释与 MEMORY 一〇九）。
+ */
+export const UCTV_PREF_KEYS = {
+  token: 'Wex_ucpan_token',
+  deviceId: 'Wex_ucpan_device_id',
+} as const;
+
+/** UC TV Token 种子输入（来自 UcTvStore 的明文记录） */
+export interface UcTvSeedInput {
+  deviceId: string;
+  token: string;
+}
+
+/** 种子文件路径 = `<沙箱>/shared_prefs/seed.txt`（与 prefsShim.PREFS_SEED_REL 同源） */
+export function wexPrefsSeedPath(sandboxDir: string): string {
+  return join(sandboxDir, 'shared_prefs', 'seed.txt');
+}
+
+/**
+ * 全量同步 wex 系 SharedPreferences 种子（第四通道）。
+ * 无任何有效凭据时删除该文件（jar 侧读到空 = 未配置）。返回写入路径或 ''。
+ * `ucTv` 非空时额外写入 UC TV Token 两键（非会员原画必需）。
+ */
+export function syncWexPrefsSeed(
+  tokens: Record<string, string>,
+  sandboxDir: string,
+  ucTv?: UcTvSeedInput | null,
+): string {
+  const lines: string[] = [];
+  // 种子是按行/按制表符切分的纯文本 ⇒ 值里不能出现 \r\n\t（cookie/JSON 实际不会，但仍防御一次）
+  const clean = (v: unknown): string => (typeof v === 'string' ? v.replace(/[\r\n\t]/g, '').trim() : '');
+  for (const [provider, key] of Object.entries(WEX_PREF_KEYS)) {
+    const v = clean(tokens?.[provider]);
+    if (v) lines.push(`${WEX_PREFS_NAME}\t${key}\t${v}`);
+  }
+  const tvToken = clean(ucTv?.token);
+  const tvDevice = clean(ucTv?.deviceId);
+  if (tvToken) {
+    lines.push(`${WEX_PREFS_NAME}\t${UCTV_PREF_KEYS.token}\t${tvToken}`);
+    if (tvDevice) lines.push(`${WEX_PREFS_NAME}\t${UCTV_PREF_KEYS.deviceId}\t${tvDevice}`);
+  }
+  for (const [key, v] of Object.entries(WEX_PREF_ENV)) lines.push(`${WEX_PREFS_NAME}\t${key}\t${v}`);
+  const path = wexPrefsSeedPath(sandboxDir);
+  if (!lines.length) {
+    rmSync(path, { force: true });
+    return '';
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, lines.join('\n') + '\n', 'utf-8');
+  return path;
 }
 
 /**

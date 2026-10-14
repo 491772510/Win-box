@@ -45,6 +45,11 @@ export const IPC = {
   DRIVE_QR_CREATE: 'drive:qrCreate',
   DRIVE_QR_POLL: 'drive:qrPoll',
   DRIVE_WEB_LOGIN: 'drive:webLogin',
+  // ★ 2026-10-14 UC TV Token（非会员 UC 原画）：桌面端复刻 jar 的扫码授权流
+  DRIVE_UC_TV_STATUS: 'drive:ucTvStatus',
+  DRIVE_UC_TV_QR_CREATE: 'drive:ucTvQrCreate',
+  DRIVE_UC_TV_QR_POLL: 'drive:ucTvQrPoll',
+  DRIVE_UC_TV_REMOVE: 'drive:ucTvRemove',
   CONFIG_IMPORT: 'config:import',
   CONFIG_LIST_SITES: 'config:listSites',
   CONFIG_DIAGNOSE: 'config:diagnose',

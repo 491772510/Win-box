@@ -334,8 +334,11 @@ function AppShell() {
           </p>
         </div>
         <div className="row" style={{ justifyContent: 'flex-end', gap: 10, marginTop: 18 }}>
-          <button style={{ flex: 0 }} onClick={() => void client.appQuit()}>拒绝</button>
-          <button className="primary" style={{ flex: 0 }} onClick={agreeDisclaim}>同意</button>
+          {/* ★ 2026-10-14：`flex: 0` = `0 1 0%` ⇒ flex-basis 归零后按 min-content 收缩，
+              中文按钮会被压成「1 个字宽」并把文字折成两行（看起来像竖排按钮）。
+              与本仓其它按钮统一用 `0 0 auto`（不可收缩、按内容取宽）。 */}
+          <button style={{ flex: '0 0 auto' }} onClick={() => void client.appQuit()}>拒绝</button>
+          <button className="primary" style={{ flex: '0 0 auto' }} onClick={agreeDisclaim}>同意</button>
         </div>
       </div>
     </div>

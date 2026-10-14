@@ -14,6 +14,7 @@ import { client } from '../api/client';
 import { checkDriveCookie } from '../../shared/driveCookie';
 import { driveProviderLabel } from '../../shared/driveProvider';
 import DriveLogin from './DriveLogin';
+import UcTvBind from './UcTvBind';
 
 /** 可绑定网盘（key = DriveStore provider 键；与 fty 绑定页的「夸克/百度/阿里/哔哩」菜单口径一致） */
 const PROVIDERS: ReadonlyArray<{ key: string; label: string }> = [
@@ -163,6 +164,10 @@ export default function DriveBindModal({ siteName, initialProvider, reason, onCl
           provider={provider}
           onBound={() => { refresh(); onSaved(); }}
         />
+
+        {/* ★ 2026-10-14：UC 专属 —— non-VIP（NORMAL）的「UC原画」走 TV Token 而非 cookie，
+            只绑 cookie 时 jar 报「非高会需要配置 UC TV Token，请到配置中心扫码获取」 */}
+        {provider === 'uc' && <UcTvBind cookieBound={bound} onBound={() => { refresh(); onSaved(); }} />}
 
         {msg && <div className="muted" style={{ fontSize: 12, marginTop: 8, lineHeight: 1.7 }}>{msg}</div>}
       </div>

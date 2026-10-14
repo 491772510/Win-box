@@ -196,6 +196,11 @@ declare global {
           IpcResult<{ state: number; token?: string; tokenKind?: 'refresh_token' | 'cookie' | 'access_token'; username?: string; hint?: string }>
         >;
         webLogin: (provider: string) => Promise<IpcResult<void>>;
+        // ★ 2026-10-14 UC TV Token（非会员 UC 原画）扫码授权流
+        ucTvStatus: () => Promise<IpcResult<{ bound: boolean }>>;
+        ucTvQrCreate: () => Promise<IpcResult<{ imageDataUrl: string }>>;
+        ucTvQrPoll: () => Promise<IpcResult<{ state: 'wait' | 'ok' | 'expired' | 'error'; hint?: string }>>;
+        ucTvRemove: () => Promise<IpcResult<void>>;
       };
       win: {
         minimize: () => Promise<IpcResult<void>>;
@@ -382,6 +387,10 @@ export const client = {
   driveQrCreate: (provider?: string) => unwrap(window.api.drives.qrCreate(provider)),
   driveQrPoll: (provider: string, sid: string) => unwrap(window.api.drives.qrPoll(provider, sid)),
   driveWebLogin: (provider: string) => unwrap(window.api.drives.webLogin(provider)),
+  ucTvStatus: () => unwrap(window.api.drives.ucTvStatus()),
+  ucTvQrCreate: () => unwrap(window.api.drives.ucTvQrCreate()),
+  ucTvQrPoll: () => unwrap(window.api.drives.ucTvQrPoll()),
+  ucTvRemove: () => unwrap(window.api.drives.ucTvRemove()),
   home: (key: string) => unwrap(window.api.vod.home(key)),
   category: (a: { key: string; tid: string; pg: string; extend?: Record<string, string> }) => unwrap(window.api.vod.category(a)),
   detail: (a: { key: string; ids: string[] }) => unwrap(window.api.vod.detail(a)),
