@@ -47,7 +47,8 @@ tvbox-win/
 ├── resources/      # js-lib + jvm 宿主源码（*.java，含 native-bridge 原生桥）
 ```
 
-
+## 说明
+Fork二改麻烦注明Github此项目，参考源码重新开发不必注明。
 
 ## 许可
 
