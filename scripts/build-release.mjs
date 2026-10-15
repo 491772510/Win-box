@@ -1,10 +1,13 @@
-// Release-only build: refuse to package source placeholder artwork
-// （例外：显式加 `--allow-placeholder` 时允许用占位图出自用包，见文件内注释）。
-import { copyFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+// Release-only build（本仓扩展：目标平台开关 / 原生桥前置校验 / LICENSE 兜底）。
+//
+// ★ 2026-10-15（合并上游 1.21.5）：上游把「赞赏图 / 加群二维码」功能**整条删除**
+//   （src/build/supportImage.ts、vite 别名、关于页弹窗），本仓随之移除
+//   `--allow-placeholder` 与「产物里含原图」的 SHA256 校验。
+//   副作用（好的那种）：现在打包**不再需要任何私有素材**，从零 clone 的仓库可直接出包。
+import { copyFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -13,90 +16,26 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 //   --win  → 与原脚本完全一致的 `--win nsis`
 //   无参数  → 默认 Windows（★ 零回归红线：默认分支的行为一字不改）
 const argv = process.argv.slice(2).filter(a => a !== '--');
-const unknown = argv.filter(a => !['--mac', '--win', '--dry-run', '--allow-placeholder', '--allow-no-bridge'].includes(a));
+const unknown = argv.filter(a => !['--mac', '--win', '--dry-run', '--allow-no-bridge'].includes(a));
 if (unknown.length) {
   console.error(`Unknown argument(s): ${unknown.join(' ')}`);
-  console.error('Usage: node scripts/build-release.mjs [--win | --mac] [--dry-run] [--allow-placeholder] [--allow-no-bridge]');
+  console.error('Usage: node scripts/build-release.mjs [--win | --mac] [--dry-run] [--allow-no-bridge]');
   process.exit(1);
 }
-// ★ 2026-10-13（用户要求）：本机没有私有原图（赞助码 / 加群二维码）时，允许用仓库自带的
-//   占位图先出一个**可自用**的安装包。默认仍严格拒绝 —— 对外发布时必须带原图。
-const allowPlaceholder = argv.includes('--allow-placeholder');
 const target = argv.includes('--mac') ? 'mac' : 'win';
 const dryRun = argv.includes('--dry-run');
 const builderArgs = target === 'mac'
   ? ['--mac', 'dmg', 'zip', '--publish', 'never']
   : ['--win', 'nsis', '--publish', 'never'];
-const PLACEHOLDERS = {
-  support: 'src/renderer/assets/author-support-placeholder.svg',
-  group: 'src/renderer/assets/group-join-placeholder.svg',
-};
 
-/**
- * 选图：环境变量 → 仓库候选 →（仅 --allow-placeholder）占位图 → 否则报错。
- * 返回 `{ path, isPlaceholder }`，供后面决定要不要做「产物里含原图」的哈希校验。
- */
-function pickImage(envVar, candidates, placeholder, label) {
-  if (process.env[envVar]) return { path: resolve(root, process.env[envVar]), isPlaceholder: false };
-  const hit = candidates.map(file => join(root, file)).find(existsSync);
-  if (hit) return { path: hit, isPlaceholder: false };
-  if (!allowPlaceholder) {
-    throw new Error(`${label} missing. Set ${envVar} to the original artwork before releasing（自用包可加 --allow-placeholder 用占位图）。`);
-  }
-  const ph = join(root, placeholder);
-  if (!existsSync(ph)) throw new Error(`${label} missing and placeholder not found: ${ph}`);
-  console.warn(`\n⚠⚠ ${label} 用占位图打包 —— 关于页会显示占位图，此包仅供自用，不要对外发布。\n`);
-  return { path: ph, isPlaceholder: true };
-}
-
-const support = pickImage(
-  'WINBOX_SUPPORT_IMAGE',
-  ['src/renderer/assets/author-support.png', '.tmp/private-assets/author-support.png'],
-  PLACEHOLDERS.support,
-  'Private support PNG',
-);
-const group = pickImage(
-  'WINBOX_GROUP_IMAGE',
-  ['src/renderer/assets/group-join.jpg', '.tmp/private-assets/group-join.jpg', 'src/renderer/assets/group-join.png', '.tmp/private-assets/group-join.png'],
-  PLACEHOLDERS.group,
-  'Private group QR image',
-);
-const image = support.path;
-const groupImage = group.path;
-const env = {
-  ...process.env,
-  WINBOX_SUPPORT_IMAGE: image,
-  WINBOX_GROUP_IMAGE: groupImage,
-  WINBOX_RELEASE_BUILD: '1',
-  // vite.config.ts 用它放开「release 必须原图」的校验（仅 --allow-placeholder 时置位）
-  ...(allowPlaceholder ? { WINBOX_ALLOW_PLACEHOLDER_ART: '1' } : {}),
-};
 const run = args => {
-  const result = spawnSync(process.execPath, args, { cwd: root, env, stdio: 'inherit' });
+  const result = spawnSync(process.execPath, args, { cwd: root, env: process.env, stdio: 'inherit' });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
 };
 run(['scripts/build-main.mjs']);
 run(['node_modules/vite/bin/vite.js', 'build']);
-const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-const assets = join(root, 'dist/renderer/assets');
 
-/**
- * 校验「构建产物里确实是那张图」。占位图模式下跳过：占位 SVG 只有 151 字节，
- * 低于 vite 的 assetsInlineLimit（4KB），会被内联成 data URL 而不落成独立文件，
- * 按文件哈希去比对必然查不到。
- */
-function verifyPackaged(pick, label) {
-  if (pick.isPlaceholder) {
-    console.warn(`⚠ ${label}：占位图已内联进产物，跳过原图哈希校验（此包仅供自用）。`);
-    return;
-  }
-  const original = hash(readFileSync(pick.path));
-  const packaged = readdirSync(assets)
-    .find(name => /\.(png|jpe?g)$/i.test(name) && hash(readFileSync(join(assets, name))) === original);
-  if (!packaged) throw new Error(`Built renderer does not contain the original ${label}. Packaging stopped.`);
-  console.log(`${label} verified: ${packaged} / SHA256 ${original}`);
-}
 // ★ 2026-10-14：原生桥 jar 必须随包 —— 缺了它，**所有含 .so 的加固壳源**在桌面上只能报
 //   「该源依赖安卓原生库（.so），桌面版无法加载（架构限制，非移植缺陷）」（见 JarSpiderBridge
 //   的 translateSpiderLog）。而这只 jar 曾经不入库，加上唯一的构建脚本 build.ps1 是 PowerShell，
@@ -122,9 +61,6 @@ if (!argv.includes('--allow-no-bridge')) {
   console.warn('⚠ --allow-no-bridge：跳过原生桥校验，本包内所有含 .so 的加固壳源将不可用。');
 }
 
-verifyPackaged(support, 'Support artwork');
-verifyPackaged(group, 'Group QR artwork');
-
 // macOS 前置检查：electron-builder 需要 build/icon.icns（icns 不入库，需先在 Mac 上生成）。
 // 只影响 --mac 分支；Windows 分支不读这个文件，行为不变。
 if (target === 'mac') {
@@ -137,7 +73,7 @@ if (target === 'mac') {
 }
 
 // ★ 2026-10-13：`build.nsis.license` 指向 `LICENSE.txt`，而该文件被 .gitignore 主动排除
-//   （与赞助码/加群二维码同一套路：正式发布机上放作者自己的协议文本，不入库）。
+//   （正式发布机上放作者自己的协议文本，不入库）。
 //   本机没有它 → NSIS 直接报 "cannot find specified resource LICENSE.txt" 而打包失败。
 //   缺文件时退回仓库里已提交的 MIT `LICENSE`（复制到同样被忽略的 LICENSE.txt，不污染版本库）。
 const licenseTxt = join(root, 'LICENSE.txt');

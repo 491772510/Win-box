@@ -433,7 +433,7 @@ JAVA_HOME="C:/Program Files/Java/jdk-17" npx vitest run tests/jvmSpawnArgs.spec.
 
 ---
 
-## 7. 与上游合并时的两个固定取舍（★ 自 1.21.4 起）
+## 7. 与上游合并时的固定取舍（★ 自 1.21.4 起）
 
 > 上游 `yagami-hue/Win-box` 与本仓对**同一个问题**各自有解法。合并时按下面裁定，不必逐次重新纠结。
 
@@ -463,3 +463,35 @@ JAVA_HOME="C:/Program Files/Java/jdk-17" npx vitest run tests/jvmSpawnArgs.spec.
   现在 `/data/…` 按 Windows 原语义解析到「当前盘根」；不碰系统的收容手段只剩
   `-Dtvbox.spiderCacheDir=<沙箱目录>`（把 `getCacheDir` / `getFilesDir` 收进数据目录）。
 - 对应回归断言：`tests/jvmSpawnArgs.spec.ts` →「不再覆盖子进程 cwd（JVM 与 Python 均无 cwd 参数）」。
+
+### 7.3 「赞赏图 / 加群二维码」→ **已随上游 1.21.5 整条删除，本仓的 `--allow-placeholder` 一并移除**
+
+- 上游 1.21.5 删的是**一整条链**：`src/build/supportImage.ts`、`src/renderer/assets.d.ts`、
+  两个占位 SVG、`tests/supportImage.spec.ts`、`vite.config.ts` 里的 `@author-support-image` /
+  `@group-join-image` 别名、关于页的两个 `<dialog>` 弹窗；换成了新的
+  「八、二次修改与再分发」（`src/renderer/lib/disclaimerText.ts` 的 `MODIFIED_BUILD_DISCLAIMER`）。
+- **裁定 = 跟随上游删除**。理由：本仓为此加的 `--allow-placeholder` /
+  `WINBOX_ALLOW_PLACEHOLDER_ART` / `WINBOX_SUPPORT_IMAGE` / `WINBOX_GROUP_IMAGE` 与
+  「产物里含原图」的 SHA256 校验，全都只为一个**已不复存在的 UI** 服务；留着等于永久维护
+  一套私有素材流水线。删掉后 **打包不再需要任何私有素材**，从零 clone 可直接出包。
+- 连带处置：`scripts/build-release.mjs` 去掉 `pickImage`/`verifyPackaged`（保留 `--mac/--win`、
+  `--dry-run`、`--allow-no-bridge`、原生桥校验、icns 校验、`LICENSE.txt` 兜底）；
+  `docs/macos-build.md` 的两张表与 `README.md` 里的私有素材段落同步改掉 / 标注已废弃。
+- ⚠ 与 7.2 不同的是：这条裁定**会改变用户可见行为**（关于页少两个按钮）。若将来上游又加回来，
+  按本节反向恢复即可（占位图与校验逻辑在 git 历史 `c1d77d6` 里）。
+
+### 7.4 合并 1.21.5 时两处**手工合成**（不是简单取一边）
+
+1. **`src/renderer/components/VideoPlayer.tsx`**：上游整段重写（+1029/−665），本仓只改了
+   6 处 mpv 可用性判定，但**全文件已归一成 LF**（上游那份是 100% CRLF）⇒ 直接合并必炸成全文件假 diff。
+   做法 = **取上游内容 → 整文件转 LF → 重新贴回本仓那 6 处**（`mpvInfo?.available` → `mpvUsable`
+   = `available && embeddable`，macOS 上 mpv 装得上但嵌不进窗口时必须退回 HTML5，见
+   `src/shared/player.ts` 的 `MpvStatus.embeddable`）。
+2. **`src/renderer/pages/DetailPage.tsx`**：分支顺序定为
+   `有剧集 → 配置项(cfgHint) → 无资源`。上游把「无剧集 1.2s 后自动跳全源搜索」改成了
+   **用户点「进入聚合搜索」**，故本仓原先挂在那个自动跳转上的守卫（`configCenterHintOf` 提前 return）
+   与模块级 `AUTO_AGG_DONE` / `autoAggRef` 随之删除 —— 配置项现在走独立分支，压根到不了「无资源」那一支。
+   收藏按钮（上游）在「有剧集」与「无资源」两支都渲染。
+
+> ⚠ **合并 1.21.5 起，`docs/macos-build.md` 里已无「打包需要私有素材」这一步** ——
+> 看到旧笔记提到 `--allow-placeholder` 一律按本节作废处理。

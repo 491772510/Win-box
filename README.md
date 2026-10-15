@@ -7,7 +7,7 @@
 > 本项目是**个人学习 / 研究性质的开源实现**，与安卓版及任何第三方站点、平台无隶属关系。
 > 仓库仅包含**核心源码**，不含任何第三方私有蜘蛛 jar、JVM 运行时、逆向壳或专有产物。
 
-**链接**：[GitHub 主页](https://github.com/yagami-hue/Win-box) · [爱发电 · 赞助](https://afdian.com/a/WinBox)（自愿，见文末说明）
+**链接**：[GitHub 主页](https://github.com/yagami-hue/Win-box) 
 
 
 
@@ -69,8 +69,6 @@ pnpm run release:upload              # 上传到已创建的 release<版本号>
 上传命令读取 `package.json` 的版本和输出目录，只选择当前版本的 Setup / 可选 portable `.exe`；不自动创建 Release、修改正文或覆盖已有附件。
 electron-builder 会规范化安装包文件名中的数字版本；上传脚本兼容规范化后的安装包文件名，Release 标签使用 `package.json` 的版本号。
 
-源码仓库的支持作者图片为纯空白占位图。正式发行构建可设置 `WINBOX_SUPPORT_IMAGE` 为本机图片路径；原图放在已忽略的 `.tmp/` 中，不提交到源码仓库，也不单独上传为 Release 附件。
-
 ## 目录结构
 
 ```
@@ -81,14 +79,11 @@ tvbox-win/
 ├── resources/      # js-lib + jvm 宿主源码（*.java，含 native-bridge 原生桥）
 ```
 
+## 说明
+Fork二改麻烦注明Github此项目，参考源码重新开发不必注明。
 
-## 赞助支持（完全自愿）
-
-如果你认可这个项目、愿意支持作者持续维护，欢迎通过 **[爱发电](https://afdian.com/a/WinBox)** 赞助。
-
-- 赞助**完全自愿**，仅用于支持作者在开发与维护上投入的时间与精力；
-- **不会获得任何额外功能、内容、权限或服务**，也不会改变软件的任何行为 —— 不赞助同样可以使用全部功能；
-- 本项目**不含任何付费内容、会员或解锁机制**；赞助与任何第三方内容、平台无关联，不构成对任何内容的购买或授权。
+## 特别感谢
+特别感谢Deepseek，GLM，GPT，哈哈。
 
 ## 许可
 

@@ -1,9 +1,7 @@
 // src/renderer/pages/AboutPage.tsx
-// 说明页：详细版免责声明、GitHub 主页、赞赏图与群聊二维码弹窗。
-import { useRef } from 'react';
-import { createPortal } from 'react-dom';
-import supportImage from '@author-support-image';
-import groupJoinImage from '@group-join-image';
+// 说明页：详细版免责声明 + GitHub 主页。
+import { MODIFIED_BUILD_DISCLAIMER } from '../lib/disclaimerText';
+// ★ macOS 适配：win32 上不显示第九节（见下方说明）
 import { isMacRenderer } from '../lib/platform';
 
 /** 项目主页（源码 / 更新发布） */
@@ -14,8 +12,6 @@ function openExternal(url: string) {
 }
 
 export default function AboutPage() {
-  const supportDialog = useRef<HTMLDialogElement>(null);
-  const groupDialog = useRef<HTMLDialogElement>(null);
   const mac = isMacRenderer();
   return (
     <>
@@ -78,10 +74,9 @@ export default function AboutPage() {
         </section>
 
         <section className="about-sec">
-          <h3>七、开源主页与赞助（自愿）</h3>
+          <h3>七、开源主页</h3>
           <p>
-             源码、更新与问题反馈见 GitHub 主页；如果你愿意支持作者持续维护，可点击「支持作者」查看赞赏码，
-             也可以点击「加入群聊」加入 WinBox 用户交流群。
+            源码、更新与问题反馈见 GitHub 主页。
           </p>
           <div className="about-links">
             <button className="about-link" onClick={() => openExternal(GITHUB_URL)} title={GITHUB_URL}>
@@ -90,31 +85,20 @@ export default function AboutPage() {
               </svg>
               <span>GitHub 主页</span>
             </button>
-            <button className="about-link about-sponsor" onClick={() => supportDialog.current?.showModal()} title="查看作者赞赏码" aria-haspopup="dialog">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M12 20.2s-7.2-4.5-7.2-10A4.6 4.6 0 0112 7.1a4.6 4.6 0 017.2 3.1c0 5.5-7.2 10-7.2 10z" />
-              </svg>
-              <span>支持作者</span>
-            </button>
-            <button className="about-link about-group" onClick={() => groupDialog.current?.showModal()} title="查看群聊二维码" aria-haspopup="dialog">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M7.5 11.2a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8ZM16.5 10.1a2.8 2.8 0 1 0 0-5.6 2.8 2.8 0 0 0 0 5.6ZM2.6 19.7c.2-3.2 2.1-5.3 4.9-5.3s4.7 2.1 4.9 5.3H2.6Zm9.2 0c.2-2.4 1.3-4.1 3.4-4.8 3.2.4 5.1 2 5.5 4.8h-8.9Z" />
-              </svg>
-              <span>加入群聊</span>
-            </button>
           </div>
-          <p className="muted">
-            赞助<b>完全自愿</b>，仅用于支持作者在开发与维护上投入的时间与精力；<b>不会获得任何额外功能、内容、权限或服务</b>，
-            也不改变软件的任何行为 —— 不赞助同样可以使用全部功能。
-          </p>
-          <p className="muted">
-            本软件不含任何付费内容、会员或解锁机制；赞助与任何第三方内容、平台亦无关联，不构成对任何内容的购买或授权。
+        </section>
+
+        <section className="about-sec">
+          <h3>八、二次修改与再分发</h3>
+          <p>
+            <b>{MODIFIED_BUILD_DISCLAIMER}</b>
           </p>
         </section>
 
+        {/* ★ macOS 适配（合并上游 1.21.5 时保留）：本节只在 macOS 显示，win32 行为与改动前一致 */}
         {mac && (
           <section className="about-sec">
-            <h3>八、首次打开被系统拦截怎么办</h3>
+            <h3>九、首次打开被系统拦截怎么办</h3>
             <p>
               若 macOS 提示应用来自身份不明的开发者，请先在 Finder 中右键 Win-Box 并选择「打开」。
               若仍被拦截，请前往「系统设置 → 隐私与安全性」，在安全性提示旁点击「仍要打开」。
@@ -133,48 +117,6 @@ export default function AboutPage() {
           </section>
         )}
       </div>
-      {createPortal(
-        <dialog
-          ref={supportDialog}
-          className="about-support-dialog"
-          aria-labelledby="about-support-title"
-          onClick={(event) => {
-            if (event.target !== event.currentTarget) return;
-            const rect = event.currentTarget.getBoundingClientRect();
-            if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
-              event.currentTarget.close();
-            }
-          }}
-        >
-          <div className="about-support-header">
-            <h3 id="about-support-title">支持作者</h3>
-            <button autoFocus onClick={() => supportDialog.current?.close()} aria-label="关闭赞赏码">关闭</button>
-          </div>
-          <img className="about-support-image" src={supportImage} alt="作者赞赏图" draggable={false} />
-        </dialog>,
-        document.body,
-      )}
-      {createPortal(
-        <dialog
-          ref={groupDialog}
-          className="about-support-dialog"
-          aria-labelledby="about-group-title"
-          onClick={(event) => {
-            if (event.target !== event.currentTarget) return;
-            const rect = event.currentTarget.getBoundingClientRect();
-            if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
-              event.currentTarget.close();
-            }
-          }}
-        >
-          <div className="about-support-header">
-            <h3 id="about-group-title">加入群聊</h3>
-            <button autoFocus onClick={() => groupDialog.current?.close()} aria-label="关闭群聊二维码">关闭</button>
-          </div>
-          <img className="about-support-image" src={groupJoinImage} alt="WinBox 群聊二维码" draggable={false} />
-        </dialog>,
-        document.body,
-      )}
     </>
   );
 }

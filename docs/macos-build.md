@@ -378,7 +378,7 @@ pnpm dist:mac
 ```
 node scripts/build-main.mjs            # 主进程打包（esbuild）
 vite build                             # 渲染层打包
-（校验赞助图 / 群二维码原图是否为真图）
+（校验 native-bridge.jar 是否随包 / macOS 上校验 build/icon.icns）
 node_modules/electron-builder/out/cli/cli.js --mac dmg zip --publish never
 ```
 
@@ -402,8 +402,10 @@ find release<版本号> -maxdepth 3 -name "Win-Box.app"
 | 报错 | 原因 | 处理 |
 | --- | --- | --- |
 | `Missing build/icon.icns — 先在 macOS 上执行...` | 没跑第 3 步 | `node scripts/make-icon.mjs` |
-| `Private support PNG missing...` / `Private group QR image missing...` | 赞助图 / 群二维码原图是私有图片，仓库里只有占位图 | 把原图放到 `.tmp/private-assets/`，或用环境变量指定：`WINBOX_SUPPORT_IMAGE=/path/a.png WINBOX_GROUP_IMAGE=/path/b.jpg pnpm dist:mac` |
-| `Built renderer does not contain the original support image` | 同上，路径给了但没被打进产物 | 确认图存在且是原图（SHA 校验） |
+| `缺少 resources/jvm/native-bridge/native-bridge.jar ...` | 原生桥 jar 被误删（它在库里，正常不该缺） | `node resources/jvm/native-bridge/build-native-bridge.mjs`；确要出降级包加 `--allow-no-bridge` |
+
+> ★ 2026-10-15（合并上游 1.21.5）：上游把「赞赏图 / 加群二维码」整条删除，本仓随之**不再需要任何私有素材** ——
+> `--allow-placeholder`、`WINBOX_SUPPORT_IMAGE` / `WINBOX_GROUP_IMAGE` 与「产物含原图」的 SHA256 校验全部移除。
 
 > **Windows 零回归**：`pnpm dist`（不带参数）走的是完全没动过的 `--win nsis` 分支，产物文件名与以前一致。
 
@@ -666,7 +668,6 @@ xattr -cr /Applications/Win-Box.app
 
 | 变量 | 作用 |
 | --- | --- |
-| `WINBOX_SUPPORT_IMAGE` | 指定赞助图原图路径（默认找 `src/renderer/assets/author-support.png`） |
-| `WINBOX_GROUP_IMAGE` | 指定群二维码原图路径 |
+| `WINBOX_ALLOW_PLACEHOLDER_ART` | ~~自用包放行占位图~~ **已废弃**（2026-10-15 合并上游 1.21.5 后，赞赏图/加群二维码功能整条删除，不再需要私有素材） |
 | `WINBOX_MAC_MPV_EMBED=0` | **macOS 上强制关闭 mpv 窗口嵌入**，降级到 HTML5 / 外部播放器 |
 | `GH_UPLOAD_PROXY` | Release 上传走哪个代理；`direct` / `none` = 直连 |
