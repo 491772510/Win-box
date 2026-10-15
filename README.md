@@ -50,6 +50,9 @@ tvbox-win/
 ## 说明
 Fork二改麻烦注明Github此项目，参考源码重新开发不必注明。
 
+## 特别感谢
+特别感谢Deepseek，GLM，GPT，哈哈。
+
 ## 许可
 
 代码采用 MIT 许可证（见 [LICENSE](LICENSE)）。请遵守第三方软件（蜘蛛 jar、运行时、壳等）各自的版权与许可。
