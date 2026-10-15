@@ -7,7 +7,7 @@
 > 本项目是**个人学习 / 研究性质的开源实现**，与安卓版及任何第三方站点、平台无隶属关系。
 > 仓库仅包含**核心源码**，不含任何第三方私有蜘蛛 jar、JVM 运行时、逆向壳或专有产物。
 
-**链接**：[GitHub 主页](https://github.com/yagami-hue/Win-box) · [爱发电 · 赞助](https://afdian.com/a/WinBox)（自愿，见文末说明）
+**链接**：[GitHub 主页](https://github.com/yagami-hue/Win-box) 
 
 
 
