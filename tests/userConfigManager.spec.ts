@@ -165,6 +165,99 @@ describe('UserConfigManager — 增删改排序与选中', () => {
     expect(kinds).toEqual(['content']);
   });
 
+  /**
+   * ★ 2026-10-15（用户报「配置里删掉的源，换源下拉里还在」）：
+   *   订阅是"全量替换"语义 → 删掉的源会在任何一次订阅往返（导入 / 启动 7 天自动刷新 / 档案切换）后复活。
+   *   修法 = 记「已删除源」墓碑（UserConfig.deletedSourceKeys），往返时按它过滤。
+   */
+  describe('已删除源墓碑（★ 2026-10-15 用户报「删了还在」）', () => {
+    it('删掉的源不会被「订阅往返」带回来（replaceFromImport 全量替换后仍不在）', () => {
+      const m = newManager(tmpDir());
+      m.replaceFromImport(fullConfig([bean('a'), bean('b'), bean('c')]), 'https://h/s.json');
+      m.deleteSource('b');
+      expect(m.sources().map((s) => s.key)).toEqual(['a', 'c']);
+      // 同一份订阅再导入一次（= 启动时 7 天自动刷新走的同一条路径）
+      m.replaceFromImport(fullConfig([bean('a'), bean('b'), bean('c')]), 'https://h/s.json');
+      expect(m.sources().map((s) => s.key)).toEqual(['a', 'c']);
+      // 档案存档 json 也不含它（换源弹层/后续切换都读不到）
+      expect(m.profileSitesView().profiles[0].sites.map((s) => s.key)).toEqual(['a', 'c']);
+    });
+
+    it('切换档案（从存档 json 全量重建）同样按墓碑过滤', () => {
+      const m = newManager(tmpDir());
+      m.replaceFromImport(fullConfig([bean('a'), bean('b')]), 'https://h/one.json');
+      const first = m.activeProfileId();
+      m.deleteSource('b');
+      m.saveAsProfile('配置二', { parsed: fullConfig([bean('x1'), bean('x2')]), apiUrl: 'https://h/two.json' });
+      // 切回旧档案：其存档 json 里带着 b，但墓碑要把它挡掉
+      m.activateProfile(first);
+      expect(m.sources().map((s) => s.key)).toEqual(['a']);
+    });
+
+    it('手动重新添加同一 key = 明确要它回来 → 墓碑清除，后续往返不再被挡', () => {
+      const m = newManager(tmpDir());
+      m.replaceFromImport(fullConfig([bean('a'), bean('b')]), 'https://h/s.json');
+      m.deleteSource('b');
+      expect(m.snapshot().deletedSourceKeys).toEqual(['b']);
+      m.addSource(bean('b'));
+      expect(m.snapshot().deletedSourceKeys).toEqual([]);
+      m.replaceFromImport(fullConfig([bean('a'), bean('b')]), 'https://h/s.json');
+      expect(m.sources().map((s) => s.key)).toEqual(['a', 'b']);
+    });
+
+    it('墓碑落盘：重启读取后仍在（不会被 normalizeLoaded 丢掉）', () => {
+      const dir = tmpDir();
+      const m = newManager(dir);
+      m.replaceFromImport(fullConfig([bean('a'), bean('b')]), 'https://h/s.json');
+      m.deleteSource('b');
+      m.replaceFromImport(fullConfig([bean('a'), bean('b')]), 'https://h/s.json');
+      const m2 = newManager(dir);
+      m2.load();
+      expect(m2.snapshot().deletedSourceKeys).toEqual(['b']);
+      m2.replaceFromImport(fullConfig([bean('a'), bean('b')]), 'https://h/s.json');
+      expect(m2.sources().map((s) => s.key)).toEqual(['a']);
+    });
+
+    it('删除未收录的 key 是 no-op，不写墓碑（避免墓碑无端膨胀）', () => {
+      const m = newManager(tmpDir());
+      m.replaceFromImport(fullConfig([bean('a')]), 'https://h/s.json');
+      m.deleteSource('不存在');
+      expect(m.snapshot().deletedSourceKeys).toEqual([]);
+    });
+
+    /**
+     * ★ 2026-10-16（用户报「本地包删掉订阅后重新导入、订阅里一个源都没有」）：
+     *   用户**主动重新导入**该订阅 = 「我要这份订阅」的明确意图 → 导入前先清掉这些 key 的墓碑；
+     *   后台自动刷新不清墓碑 ⇒ 「删掉的不被刷新带回来」口径不变。
+     */
+    it('clearDeletedSourceKeys 只清指定 key，其余墓碑保留（主动重导用）', () => {
+      const m = newManager(tmpDir());
+      m.replaceFromImport(fullConfig([bean('a'), bean('b'), bean('c')]), 'https://h/s.json');
+      m.deleteSources(['a', 'b']);
+      expect(m.snapshot().deletedSourceKeys).toEqual(['a', 'b']);
+      m.clearDeletedSourceKeys(['a', '不存在']);
+      expect(m.snapshot().deletedSourceKeys).toEqual(['b']);
+      // 清过墓碑的 'a' 能回来；没清的 'b' 仍被过滤（= 自动刷新口径未被改动）
+      m.replaceFromImport(fullConfig([bean('a'), bean('b'), bean('c')]), 'https://h/s.json');
+      expect(m.sources().map((s) => s.key)).toEqual(['a', 'c']);
+    });
+
+    it('clearDeletedSourceKeys 无墓碑/无变化时不触发 content 变更（不写盘）', () => {
+      const m = newManager(tmpDir());
+      m.replaceFromImport(fullConfig([bean('a')]), 'https://h/s.json');
+      const kinds: string[] = [];
+      m.setOnChange((_snap, kind) => kinds.push(kind));
+      m.clearDeletedSourceKeys(['a']); // 当前无墓碑 → no-op
+      expect(kinds).toEqual([]);
+      m.deleteSource('a');
+      expect(kinds).toEqual(['content']);
+      const before = m.snapshot().deletedSourceKeys;
+      m.clearDeletedSourceKeys(['不存在']); // 无交集 → 不再写盘
+      expect(m.snapshot().deletedSourceKeys).toEqual(before);
+      expect(kinds).toEqual(['content']);
+    });
+  });
+
   it('moveSource：up/down/top/bottom 排序正确；边界 no-op 不抛', () => {
     const m = newManager(tmpDir());
     m.addSource(bean('a'));
@@ -358,17 +451,25 @@ describe('UserConfigManager v2 — 多配置档案（profiles）', () => {
     expect(m2.sources().map((s) => s.key)).toEqual(['x1', 'x2']);
   });
 
-  it('删除当前生效档案被拒绝；切走后可删', () => {
+  it('删除档案：非生效直接移除；删除生效档自动切到剩下的那份；删唯一一份清空订阅内容', () => {
     const dir = tmpDir();
     const m = newManager(dir);
     m.replaceFromImport(fullConfig([bean('p1')]), 'https://h/p.json');
     const pa = m.activeProfileId();
-    expect(() => m.deleteProfile(pa)).toThrow(/当前生效/);
-    m.saveAsProfile('另一个');
+    m.saveAsProfile('另一个'); // active 移到新档，两份内容都还是 p1
     const other = m.profiles().find((p) => p.id !== pa)!;
-    m.deleteProfile(pa); // 现在 active=另一个，可删 A
-    expect(m.profiles().some((p) => p.id === pa)).toBe(false);
-    expect(m.profiles().length).toBe(1);
+
+    // ★ 2026-10-16（用户要求）：生效档案不再拒绝删除 —— 自动切到剩下的第一份并按其存档重建
+    m.deleteProfile(other.id);
+    expect(m.profiles().some((p) => p.id === other.id)).toBe(false);
+    expect(m.activeProfileId()).toBe(pa);
+    expect(m.sources().map((s) => s.key)).toEqual(['p1']);
+
+    // 删唯一一份：清空订阅内容（sources / 订阅自带 lives / parses），本地导入线路另测（见 localLive/墓碑用例）
+    m.deleteProfile(pa);
+    expect(m.profiles().length).toBe(0);
+    expect(m.activeProfileId()).toBe('');
+    expect(m.sources().length).toBe(0);
   });
 
   // ★ 2026-09-26（用户口径）：导入新订阅 → 旧档案改名「旧订阅 xx」+ 新档案「新订阅 xx」并切换过去
@@ -519,6 +620,20 @@ describe('UserConfigManager — ★ 2026-09-30 换源弹层数据与本地直播
     m.activateProfile(aId);
     expect(m.lives()).toHaveLength(1);
     expect(m.lives()[0].name).toBe('改过名');
+  });
+
+  it('★ deleteLives：批量按下标删除，收敛 activeLiveIndex，越界忽略', () => {
+    const dir = tmpDir();
+    const m = newManager(dir);
+    m.addLive(liveBean('A', LOCAL + '?a'));
+    m.addLive(liveBean('B', LOCAL + '?b'));
+    m.addLive(liveBean('C', LOCAL + '?c'));
+    m.setActiveLiveIndex(2);
+    m.deleteLives([0, 2, 99]); // 99 越界忽略
+    expect(m.lives().map((l) => l.name)).toEqual(['B']);
+    expect(m.activeLiveIndex()).toBe(0);
+    m.deleteLives([]); // 空集合 no-op
+    expect(m.lives()).toHaveLength(1);
   });
 
   it('删除本地线路后，后续订阅替换不会让它复活', () => {

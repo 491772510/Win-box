@@ -35,7 +35,7 @@ const api = {
         error?: string;
         result?: { config: SiteConfig; report: ImportReport; warnings: string[]; urls?: { name: string; url: string }[] };
       }>(IPC.CFG_IMPORT_JSON_LOCAL, name),
-    importPyLocal: () => invoke<{ ok: boolean; key?: string; error?: string }>(IPC.CFG_IMPORT_PY_LOCAL),
+    importPyLocal: () => invoke<{ ok: boolean; key?: string; keys?: string[]; imported?: number; failed?: { name: string; error: string }[]; error?: string }>(IPC.CFG_IMPORT_PY_LOCAL),
     /**
      * ★ 2026-09-30（用户要求）：导入**本地 TXT / M3U 直播源**（配置页按钮）。
      * ★ 2026-10-14：改为**两步导入**（对齐本地包命名流程）——
@@ -46,6 +46,8 @@ const api = {
       invoke<{ ok: boolean; needsName?: boolean; path?: string; name?: string; index?: number; replaced?: boolean; total?: number; error?: string }>(IPC.CFG_IMPORT_LIVE_LOCAL, args),
     /** ★ 2026-10-14（用户要求）：删除某条直播线路（下标） */
     deleteLive: (index: number) => invoke<void>(IPC.CFG_DELETE_LIVE, index),
+    /** ★ 2026-10-16（用户要求）：批量删除直播线路（下标数组） */
+    deleteLives: (indices: number[]) => invoke<void>(IPC.CFG_DELETE_LIVES, indices),
     /** ★ 2026-10-14（用户要求）：重命名某条直播线路 */
     updateLive: (a: { index: number; name: string }) => invoke<void>(IPC.CFG_UPDATE_LIVE, a),
     /**
@@ -178,7 +180,7 @@ const api = {
     // ★ 发现页榜单（无源时的默认主页；refresh=true 绕过 6h 缓存）
     discover: (refresh?: boolean) => invoke<DiscoverSection[]>(IPC.META_DISCOVER, !!refresh),
     movieHot: () => invoke(IPC.META_MOVIE_HOT),
-    discoverImages: (name: string, mediaType: 'movie' | 'tv', year?: string, kind?: 'backdrop' | 'poster') => invoke<MetaImages>(IPC.META_DISCOVER_IMAGES, name, mediaType, year, kind),
+    discoverImages: (name: string, mediaType: 'movie' | 'tv', year?: string, kind?: 'backdrop' | 'poster', doubanId?: string) => invoke<MetaImages>(IPC.META_DISCOVER_IMAGES, name, mediaType, year, kind, doubanId),
     // 发现页分类随当前榜单来源切换。
     genres: () => invoke<{ movie: DiscoverGenre[]; tv: DiscoverGenre[] }>(IPC.META_GENRES),
     genrePage: (mediaType: 'movie' | 'tv', genreId: number, page: number) =>
@@ -306,6 +308,14 @@ const api = {
       ipcRenderer.on(IPC.MPV_STATE, l);
       return () => ipcRenderer.removeListener(IPC.MPV_STATE, l);
     },
+  },
+  // ★ 2026-10-16 插件系统（M1）：列表 / 安装（主进程弹选择框）/ 卸载 / 启停 / 超分状态
+  plugins: {
+    list: () => invoke(IPC.PLUGIN_LIST),
+    install: () => invoke(IPC.PLUGIN_INSTALL),
+    uninstall: (id: string) => invoke(IPC.PLUGIN_UNINSTALL, id),
+    setEnabled: (a: { id: string; enabled: boolean }) => invoke(IPC.PLUGIN_SET_ENABLED, a),
+    sr: () => invoke(IPC.PLUGIN_SR),
   },
   // ★ 2026-09-29 磁力（BT）：探测本机已安装的外部播放器（MKV/HEVC 接力；只探测不启动）
   bt: {

@@ -495,3 +495,42 @@ JAVA_HOME="C:/Program Files/Java/jdk-17" npx vitest run tests/jvmSpawnArgs.spec.
 
 > ⚠ **合并 1.21.5 起，`docs/macos-build.md` 里已无「打包需要私有素材」这一步** ——
 > 看到旧笔记提到 `--allow-placeholder` 一律按本节作废处理。
+
+### 7.5 合并 1.21.8（插件系统 / 超分 / 选集抽屉）时的取舍
+
+1. **`src/renderer/components/VideoPlayer.tsx` —— 同一套手法，第二次遇到（§7.4-1 的复现）**：
+   上游该文件仍是 **100% CRLF**，本仓是纯 LF ⇒ 整文件冲突。做法一字不变 =
+   **取上游内容 → 整文件转 LF → 重新贴回本仓补丁**。补丁内容仍是 **7 处 `mpvUsable`**
+   （1 处定义 + 1 处 `setKernel` 入参 + 1 处依赖数组 + 1 处 `mpvAvailRef` + 3 处 `allowMpv &&` 判定）。
+   ⚠️ **上游自己不会带 `mpvUsable`**（它没有 macOS 那个 `embeddable` 顾虑），所以「上游版里裸用
+   `mpvInfo?.available` 的处数」就是需要替换的处数 —— 用 `grep -c` 对一下再动手，别凭记忆。
+   ★ 脚本化时注意：替换函数必须作用在**累积的缓冲区**上（`buf[0] = buf[0].replace(...)`），
+   若内部误引用原始文本，前面的替换会被静默重置（本次已踩，靠 assert 拦住）。
+2. **`src/main/index.ts`**：import 区冲突 ⇒ **两侧 import 全部并存**（上游 `PluginHost` /
+   `pluginsDir` / `builtinPluginsDir` / `clearWinboxCache` / `updateCacheReset` 与本地 macOS 的
+   `installApplicationMenu` / `appRestart` / `platform`）。注意 `registerIpc(...)` 上游新增了
+   第 6 个参数 `plugins: PluginHost`，必须跟着带上。
+3. **`tests/mpvCore.spec.ts`**：import 区冲突 ⇒ 两侧并存（本地 `mpvVideoArgs`/`mpvWidArgs` +
+   上游 `mpvShadersCmd`），按字母序插好即可。
+
+#### ⚠️ 上游自带的测试缺陷（**别误判成本次合并的回归**）
+
+`tests/pluginContract.spec.ts`（1.21.8 新增）里有一条「skill 示例 ↔ 宿主契约交叉校验」，
+读 `../../.trae/skills/winbox-plugin/assets/example-super-resolution.plugin.json`。但：
+
+- `git ls-tree -r upstream/main | grep '^\.trae/'` = **0 条** —— 上游 tree 里根本没有 `.trae/`；
+- 上游自己的 `.gitignore` 里**就有 `.trae/`**（本仓同规则，来自初始提交 `953c8ac`）；
+- 该测试**没有** `existsSync` / `skipIf` 守卫。
+
+⇒ 结论：作者本地有 `.trae/`（Trae IDE 的 skill 目录）所以他不失败，但**任何纯净克隆跑全量测试
+都必挂这一条**。这是上游缺陷，与本仓合并无关。**不要为了让它变绿去改上游测试**（会引入永久
+本地分歧）；要处理就作为独立议题（给测试加缺失跳过守卫 / 把资产 `git add -f` 入库）另行决定。
+
+#### ★ 合并后「本地改动零丢失」的正确校验手法
+
+顺手记一条本次学到的：**不能拿 `git diff -w upstream/main -- <file>` 与
+`git diff -w <merge-base> <ours> -- <file>` 比 md5** —— 上游若在同一区域有改动，auto-merge 后
+本地那几行的**落点会平移**，hunk 头一变 md5 就不等（本次 11 个文件全部 md5 不等，但实际零丢失）。
+
+✅ 正确做法 = 比 **「新增行集合」**：两侧各取 `git diff -w ... | grep '^+' | grep -v '^+++' | sort`
+再比 md5 与行数。本次 11 个文件全部逐行一致（如 `ipc/index.ts` 74/74、`SpiderHost.ts` 96/96）。

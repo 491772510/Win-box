@@ -12,10 +12,11 @@ import { getShowDiscover, setShowDiscover, getMotionPref, setMotionPref, getNavM
 import { THEME_LABELS, type Theme } from '../lib/themeTokens';
 import { DEFAULT_META_SETTINGS, type MetaSettings } from '../../shared/meta';
 import { DEFAULT_PLAYER_SETTINGS, type PlayerSettings, type MpvStatus } from '../../shared/player';
+import type { PluginView } from '../../shared/plugin';
 import type { DavServer } from '../../shared/webdav';
 import { isMacRenderer } from '../lib/platform';
 
-type TabId = 'sources' | 'health' | 'profiles' | 'account' | 'storage' | 'appearance' | 'play' | 'shortcut' | 'network' | 'backup';
+type TabId = 'sources' | 'health' | 'profiles' | 'account' | 'storage' | 'appearance' | 'play' | 'plugins' | 'shortcut' | 'network' | 'backup';
 
 interface Draft {
   name: string;
@@ -141,6 +142,50 @@ export default function ConfigPage() {
   useEffect(() => {
     client.playerPrefsGet().then((s) => setPlayPrefs(s)).catch(() => undefined);
   }, []);
+  // ---- ★ 2026-10-16 插件/组件（M1）：列表 / 安装 / 卸载 / 启停（超分插件也在这里管）----
+  const [pluginItems, setPluginItems] = useState<PluginView[]>([]);
+  const [pluginMsg, setPluginMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
+  const [pluginBusy, setPluginBusy] = useState(false);
+  const loadPlugins = async () => {
+    try {
+      setPluginItems(await client.pluginList());
+    } catch (e) {
+      setPluginMsg({ text: `读取插件列表失败：${(e as Error).message}`, kind: 'err' });
+    }
+  };
+  const applyPluginResult = (r: { items?: PluginView[]; reason?: string }, okText: string) => {
+    if (r.items) setPluginItems(r.items);
+    setPluginMsg(r.reason ? { text: r.reason, kind: 'err' } : { text: okText, kind: 'ok' });
+  };
+  const installPlugin = async () => {
+    setPluginBusy(true);
+    try {
+      const r = await client.pluginInstall();
+      if (r.canceled) return;
+      applyPluginResult(r, '安装成功（运行库就绪前该插件保持「未就位」）');
+    } catch (e) {
+      setPluginMsg({ text: `安装失败：${(e as Error).message}`, kind: 'err' });
+    } finally {
+      setPluginBusy(false);
+    }
+  };
+  const uninstallPlugin = async (id: string, name: string) => {
+    if (!window.confirm(`确定卸载插件「${name}」？（删掉磁盘上的插件目录；随包官方插件下次启动会重新就位）`)) return;
+    setPluginBusy(true);
+    try {
+      applyPluginResult(await client.pluginUninstall(id), '已卸载');
+    } finally {
+      setPluginBusy(false);
+    }
+  };
+  const togglePluginEnabled = async (id: string, on: boolean) => {
+    setPluginBusy(true);
+    try {
+      applyPluginResult(await client.pluginSetEnabled({ id, enabled: on }), on ? '已启用' : '已停用（保留磁盘）');
+    } finally {
+      setPluginBusy(false);
+    }
+  };
   const toggleM3u8Purify = async (on: boolean) => {
     try {
       const s = await client.playerPrefsSet({ m3u8Purify: on });
@@ -364,8 +409,12 @@ export default function ConfigPage() {
   }, [liveNamePrompt]);
   const [liveEditIdx, setLiveEditIdx] = useState<number | null>(null);
   const [liveEditName, setLiveEditName] = useState('');
+  /** ★ 2026-10-16（用户要求）：直播线路多选删除（对齐「我的源列表」的多选范式） */
+  const [livePick, setLivePick] = useState<Set<number>>(new Set());
+  const [liveDeleteBusy, setLiveDeleteBusy] = useState(false);
   const sourceProfileRef = useRef<string | null>(null);
   const selectAllSourcesRef = useRef<HTMLInputElement>(null);
+  const selectAllLivesRef = useRef<HTMLInputElement>(null);
 
   // 档案改名（内联编辑）
   const [renameId, setRenameId] = useState<string | null>(null);
@@ -396,6 +445,7 @@ export default function ConfigPage() {
     const profileChanged = sourceProfileRef.current !== c.activeProfileId;
     sourceProfileRef.current = c.activeProfileId;
     setSourcePick((previous) => profileChanged ? new Set() : new Set([...previous].filter(key => c.sources.some(s => s.key === key))));
+    setLivePick((previous) => new Set([...previous].filter((i) => i >= 0 && i < (c.lives ?? []).length)));
     setCfg(c);
     window.dispatchEvent(new Event(SOURCES_CHANGED));
   }, []);
@@ -454,9 +504,11 @@ export default function ConfigPage() {
       if (r.ok) {
         setReport(null);
         setWarn([]);
-        setErr('');
-        // 提示语走 url 区下方的软提示（无 warning 时也显示成功）
-        setLastOk(`已导入本地 .py 源：${r.key}`);
+        // 提示语走 url 区下方的软提示（无 warning 时也显示成功）；多选时按数量提示
+        const n = r.imported ?? 1;
+        setLastOk(n > 1 ? `已导入 ${n} 个本地 .py 源` : `已导入本地 .py 源：${r.key}`);
+        // 多选时部分文件失败：成功照常入账，失败明细单独上屏
+        setErr(r.failed?.length ? r.error || '' : '');
         await refresh();
       }
       // r.ok=false 且无 error = 用户取消文件选择，静默
@@ -594,6 +646,36 @@ export default function ConfigPage() {
     }
   }
 
+  function toggleLivePick(index: number) {
+    setLivePick((previous) => {
+      const next = new Set(previous);
+      if (next.has(index)) next.delete(index); else next.add(index);
+      return next;
+    });
+  }
+
+  /** ★ 2026-10-16（用户要求）：多选删除直播线路（对齐「我的源列表」的批量删除）。 */
+  async function deleteSelectedLives() {
+    const lives = cfg?.lives ?? [];
+    const picked = lives.map((_, i) => i).filter((i) => livePick.has(i));
+    if (!picked.length || liveDeleteBusy) return;
+    const names = picked.map((i) => lives[i]?.name || `线路${i + 1}`);
+    if (!window.confirm(`确定删除选中的 ${picked.length} 条直播线路吗？\n${names.slice(0, 6).join('、')}${names.length > 6 ? '…' : ''}\n只从应用线路列表移除，不改动你导入的原始文件。`)) return;
+    setLiveDeleteBusy(true);
+    setErr('');
+    try {
+      await client.cfgDeleteLives(picked);
+      if (liveEditIdx !== null && livePick.has(liveEditIdx)) { setLiveEditIdx(null); setLiveEditName(''); }
+      setLivePick(new Set());
+      setLastOk(`已删除 ${picked.length} 条直播线路`);
+      await refresh();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setLiveDeleteBusy(false);
+    }
+  }
+
   /** ★ 2026-10-14（用户要求）：直播线路改名（内联编辑）。 */
   async function saveLiveName(index: number) {
     const name = liveEditName.trim();
@@ -712,6 +794,9 @@ export default function ConfigPage() {
   const activeKey = cfg?.ui.activeSourceKey ?? '';
   const selectedSourceCount = sources.filter(s => sourcePick.has(s.key)).length;
   const allSourcesSelected = sources.length > 0 && selectedSourceCount === sources.length;
+  const lives = cfg?.lives ?? [];
+  const selectedLiveCount = lives.map((_, i) => i).filter(i => livePick.has(i)).length;
+  const allLivesSelected = lives.length > 0 && selectedLiveCount === lives.length;
 
   async function saveProfile() {
     setErr('');
@@ -736,9 +821,22 @@ export default function ConfigPage() {
     try { await client.cfgUpdateProfileName({ id, name }); await refresh(); }
     catch (e) { setErr((e as Error).message); }
   }
-  async function delProfile(id: string) {
+  /**
+   * ★ 2026-10-16（用户要求）：**当前生效的配置也可删，唯一一份也可删**。
+   * 主进程侧规则：删生效档案 → 自动切到剩下的第一份（没有其它档案则清空订阅内容、保留本机直播线路）。
+   * 这里给删除加确认（生效/唯一一份的后果说清楚），避免误点。
+   */
+  async function delProfile(id: string, name: string) {
+    const total = cfg?.profiles?.length ?? 0;
+    const active = id === cfg?.activeProfileId;
+    const tail = active
+      ? total > 1
+        ? '删除后将自动切换到剩下的配置。'
+        : '这是唯一一份配置：删除后当前订阅的源列表会被清空（本机导入的直播线路保留）。'
+      : '';
+    if (!window.confirm(`确定删除配置「${name}」吗？${tail}`)) return;
     setErr('');
-    try { await client.cfgDeleteProfile(id); await refresh(); }
+    try { await client.cfgDeleteProfile(id); setRenameId(null); await refresh(); }
     catch (e) { setErr((e as Error).message); }
   }
   /** 一键删除体检"失败"（error）的源 —— 仅删除当前管理列表中的源，不触碰任何原始/档案 JSON */
@@ -969,6 +1067,7 @@ export default function ConfigPage() {
     { id: 'storage', label: '存储' },
     { id: 'appearance', label: '外观' },
     { id: 'play', label: '播放' },
+    { id: 'plugins', label: '插件/组件' },
     { id: 'shortcut', label: '快捷键' },
     { id: 'network', label: '网络' },
     { id: 'backup', label: '备份' },
@@ -992,13 +1091,18 @@ export default function ConfigPage() {
     if (selectAllSourcesRef.current) {
       selectAllSourcesRef.current.indeterminate = selectedSourceCount > 0 && !allSourcesSelected;
     }
-  }, [tab, selectedSourceCount, allSourcesSelected]);
+    if (selectAllLivesRef.current) {
+      selectAllLivesRef.current.indeterminate = selectedLiveCount > 0 && !allLivesSelected;
+    }
+  }, [tab, selectedSourceCount, allSourcesSelected, selectedLiveCount, allLivesSelected]);
 
   // ★ 2026-09-29：切到「存储」tab 时拉取 WebDAV 服务器列表（放在 tab 声明之后，避免 TDZ）
   useEffect(() => {
     if (tab === 'storage') void loadDav();
     // ★ 2026-09-30：切到「源健康与维护」时拉数据目录信息（展示 + 排障）
     if (tab === 'health') client.dataDir().then(setDataDir).catch(() => undefined);
+    // ★ 2026-10-16：切到「插件/组件」时刷新插件列表
+    if (tab === 'plugins') void loadPlugins();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -1299,12 +1403,25 @@ export default function ConfigPage() {
           直播线路（{(cfg?.lives ?? []).length}）
         </summary>
         <div style={{ marginTop: 10 }}>
-          {(cfg?.lives ?? []).length === 0 ? (
+          {lives.length === 0 ? (
             <div className="empty" style={{ padding: 12 }}>尚无直播线路，可点上方「导入直播源（TXT / M3U）」添加</div>
           ) : (
+            <>
+            {/* ★ 2026-10-16（用户要求）：直播线路也要能多选删除（对齐「我的源列表」） */}
+            <div className="row" style={{ marginBottom: 10 }}>
+              <span className="muted">已选 {selectedLiveCount} / {lives.length} 条线路</span>
+              <button disabled={liveDeleteBusy || !selectedLiveCount} onClick={() => setLivePick(new Set())}>清空选择</button>
+              <button disabled={busy || liveDeleteBusy || !selectedLiveCount} onClick={() => void deleteSelectedLives()} style={{ color: 'var(--danger)' }}>
+                {liveDeleteBusy ? '删除中…' : `删除所选（${selectedLiveCount}）`}
+              </button>
+            </div>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr style={{ color: 'var(--text-dim)', textAlign: 'left' }}>
+                  <th style={{ padding: 6, borderBottom: '1px solid var(--border)', width: 36, textAlign: 'center' }}>
+                    <input ref={selectAllLivesRef} type="checkbox" className="sel-box" aria-label="全选线路" title="全选 / 取消全选" checked={allLivesSelected} disabled={liveDeleteBusy}
+                      onChange={e => setLivePick(e.target.checked ? new Set(lives.map((_, i) => i)) : new Set())} />
+                  </th>
                   <th style={{ padding: 6, borderBottom: '1px solid var(--border)', width: 36, textAlign: 'center' }}>当前</th>
                   <th style={{ padding: 6, borderBottom: '1px solid var(--border)' }}>名称</th>
                   <th style={{ padding: 6, borderBottom: '1px solid var(--border)' }}>地址</th>
@@ -1312,15 +1429,18 @@ export default function ConfigPage() {
                 </tr>
               </thead>
               <tbody>
-                {(cfg?.lives ?? []).map((l, i) => {
+                {lives.map((l, i) => {
                   const isActive = i === (cfg?.ui.activeLiveIndex ?? 0);
                   const editing = liveEditIdx === i;
                   return (
                     <tr
                       key={i}
-                      onClick={() => { if (!editing) void client.cfgSetActiveLive(i).then(refresh).catch((e) => setErr((e as Error).message)); }}
+                      onClick={() => { if (!editing && !liveDeleteBusy) void client.cfgSetActiveLive(i).then(refresh).catch((e) => setErr((e as Error).message)); }}
                       style={{ cursor: editing ? 'default' : 'pointer', background: isActive && !editing ? 'var(--bg-elev2)' : undefined }}
                     >
+                      <td style={{ padding: 6, borderBottom: '1px solid var(--border)', textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+                        <input type="checkbox" className="sel-box" aria-label={`选择线路 ${l.name || `线路${i + 1}`}`} checked={livePick.has(i)} disabled={liveDeleteBusy} onChange={() => toggleLivePick(i)} />
+                      </td>
                       <td style={{ padding: 6, borderBottom: '1px solid var(--border)', textAlign: 'center', color: 'var(--accent)' }}>{isActive ? '●' : '○'}</td>
                       <td style={{ padding: 6, borderBottom: '1px solid var(--border)' }}>
                         {editing ? (
@@ -1347,7 +1467,7 @@ export default function ConfigPage() {
                         ) : (
                           <>
                             <button className="linkbtn" title="重命名该直播线路" onClick={() => { setLiveEditIdx(i); setLiveEditName(l.name || `线路${i + 1}`); }}>改名</button>
-                            <button className="linkbtn danger" title="删除该直播线路" onClick={() => void delLive(i, l.name)}>删除</button>
+                            <button className="linkbtn danger" disabled={liveDeleteBusy} title="删除该直播线路" onClick={() => void delLive(i, l.name)}>删除</button>
                           </>
                         )}
                       </td>
@@ -1356,9 +1476,10 @@ export default function ConfigPage() {
                 })}
               </tbody>
             </table>
+            </>
           )}
           <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-            点某行可把它设为直播页当前线路；「删除」只从应用线路列表移除，不改动你导入的原始文件。
+            勾选多行可批量删除；点某行可把它设为直播页当前线路；「删除」只从应用线路列表移除，不改动你导入的原始文件。
           </div>
         </div>
       </details>
@@ -1564,7 +1685,8 @@ export default function ConfigPage() {
       
 {/* 0) 多配置档案（多 JSON 源切换） */}
       <div className="card" id="cfg-profiles" style={{ padding: 12, marginBottom: 16 }}>
-        <details open={false}>
+        {/* ★ 2026-10-16（用户要求）：该列表默认展开 */}
+        <details open>
           <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
             已保存配置（多份订阅离线切换）
             {cfg?.profiles?.length ? <span className="muted" style={{ fontWeight: 400 }}> —— 共 {cfg.profiles.length} 份，当前「{cfg.profiles.find((p) => p.id === cfg.activeProfileId)?.name ?? '未知'}」</span> : null}
@@ -1603,7 +1725,8 @@ export default function ConfigPage() {
                       {p.name}{active ? ' ✓' : ''} <span className="muted">({p.sourceCount})</span>
                       <button className="linkbtn" title="重命名该配置" onClick={() => { setRenameId(p.id); setRenameDraft(p.name); }}>改名</button>
                       {!active && <button className="linkbtn" onClick={() => activateProfile(p.id)}>切换</button>}
-                      {!active && <button className="linkbtn danger" onClick={() => delProfile(p.id)}>删</button>}
+                      {/* ★ 2026-10-16（用户要求）：生效档案 / 唯一一份也允许删除（主进程侧会自动切档或清空） */}
+                      <button className="linkbtn danger" title="删除该配置" onClick={() => void delProfile(p.id, p.name)}>删</button>
                     </>
                   )}
                 </span>
@@ -1812,17 +1935,20 @@ export default function ConfigPage() {
         <div className="row" style={{ marginBottom: 8 }}>
           <span className="muted" style={{ fontWeight: 600 }}>详情与搜索的打开方式</span>
         </div>
-        <div className="pill-switch" role="radiogroup" aria-label="页面打开方式">
+        {/* ★ 2026-10-15（用户报「按上去外观无变化、按钮不变色、netflix 下外框很小」）：
+            改用与上方「外观主题 / 界面动效」**完全同一套**胶囊标签（`.tag` + 选中打 ✓）——
+            那两个开关在各皮肤下都正常，统一口径后选中态必然可见，也不再有一层单独的外框。 */}
+        <div className="row" style={{ gap: 6 }} role="radiogroup" aria-label="页面打开方式">
           {([['inline', '本页内'], ['window', '独立窗口']] as [NavMode, string][]).map(([v, label]) => (
             <button
               key={v}
               type="button"
               role="radio"
               aria-checked={navMode === v}
-              className={navMode === v ? 'active' : ''}
+              className={`tag ${navMode === v ? 'active' : ''}`}
               onClick={() => { setNavModeState(v); setNavMode(v); }}
             >
-              {label}
+              {label} {navMode === v ? '✓' : ''}
             </button>
           ))}
         </div>
@@ -1993,6 +2119,80 @@ export default function ConfigPage() {
           )}
         </div>
       </div>
+      </>
+      )}
+
+      {/* ===== 七、插件/组件（★ 2026-10-16 M1：列表 / 安装 / 卸载 / 启停；超分插件也在这里管理） ===== */}
+      {tab === 'plugins' && (
+      <>
+      <div className="card" id="cfg-plugins" style={{ padding: 12, marginBottom: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <span style={{ fontWeight: 600 }}>插件 / 组件</span>
+          <span className="muted" style={{ fontSize: 11 }}>
+            插件是独立打包的 <b>.winbox</b>（zip）单元：官方插件随软件附带，装第三方插件请选
+            <b>本地 .winbox 文件</b>安装。停用会保留磁盘内容、只是不生效；卸载会删掉插件目录
+            （随包官方插件下次启动会重新就位）。
+          </span>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <button className="primary" disabled={pluginBusy} onClick={() => void installPlugin()}>安装插件…</button>
+            <button disabled={pluginBusy} onClick={() => void loadPlugins()}>刷新</button>
+            <span className="muted" style={{ fontSize: 11, marginLeft: 'auto' }}>
+              共 {pluginItems.length} 个
+            </span>
+          </div>
+          {pluginMsg && (
+            <span className={pluginMsg.kind === 'err' ? 'err' : 'status'} style={{ margin: 0, wordBreak: 'break-all' }}>
+              {pluginMsg.text}
+            </span>
+          )}
+        </div>
+      </div>
+      {pluginItems.length === 0 ? (
+        <div className="card" style={{ padding: 12 }}>
+          <span className="muted" style={{ fontSize: 12 }}>
+            还没有插件。安装官方超分插件后，播放器（MPV 内核）里会出现「超分」档位按钮。
+          </span>
+        </div>
+      ) : (
+        pluginItems.map((p) => (
+          <div key={p.id} className="card" style={{ padding: 12, marginBottom: 10 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ fontWeight: 600 }}>{p.name}</span>
+                <span className="muted" style={{ fontSize: 11 }}>{p.id} · v{p.version}</span>
+                <span className="tag" title="插件来源">{p.source === 'builtin' ? '随包官方' : '用户安装'}</span>
+                <span className="tag" title="能力分级">{p.level}</span>
+                {p.modes.length > 0 && (
+                  <span className="tag" title="贡献的档位">档位 {p.modes.map((m) => m.label).join('/')}</span>
+                )}
+                <span className={!p.ready ? 'err' : 'status'} style={{ margin: 0, fontSize: 11 }}>
+                  {p.ready ? (p.enabled ? '已启用' : '已停用') : '未就位（载荷缺失）'}
+                </span>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                {/* 启停：与第三方统一（停用保留磁盘、不参与宿主装配） */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={p.enabled}
+                    disabled={pluginBusy}
+                    onChange={(e) => void togglePluginEnabled(p.id, e.target.checked)}
+                  />
+                  <span>启用</span>
+                </label>
+                <button
+                  className=""
+                  style={{ marginLeft: 'auto' }}
+                  disabled={pluginBusy}
+                  onClick={() => void uninstallPlugin(p.id, p.name)}
+                >
+                  卸载
+                </button>
+              </div>
+            </div>
+          </div>
+        ))
+      )}
       </>
       )}
 

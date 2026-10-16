@@ -36,6 +36,7 @@ import type { MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenreP
 import type { MetaSettings, MetaSettingsView, MetaSuggestion } from '../../shared/meta';
 import type { ExploreQuery, ExplorePage, ExploreVocabulary } from '../../shared/discover';
 import type { PlayerSettings, MpvStatus, MpvStartOptions, MpvCommand, MpvStateEvent } from '../../shared/player';
+import type { PluginView, SrState } from '../../shared/plugin';
 import type { BackupExportResult, BackupImportResult } from '../../shared/backup';
 import type { DavBrowseResult, DavServer } from '../../shared/webdav';
 import type { DlnaCastResult, DlnaCastTarget, DlnaDevice } from '../../shared/dlna';
@@ -82,7 +83,8 @@ declare global {
         // ★ 2026-09-27：本地 .json 订阅文件导入（文件选择器；档案名默认取原始文件名）
         importJsonLocal: (name?: string) =>
           Promise<IpcResult<{ ok: boolean; file?: string; name?: string; error?: string; result?: ImportReturn }>>;
-        importPyLocal: () => Promise<IpcResult<{ ok: boolean; key?: string; error?: string }>>;
+        /** ★ 2026-10-16：文件选择器支持多选，一次性导入多个 .py（`imported` 数量 / `failed` 明细） */
+        importPyLocal: () => Promise<IpcResult<{ ok: boolean; key?: string; keys?: string[]; imported?: number; failed?: { name: string; error: string }[]; error?: string }>>;
         /**
          * ★ 2026-09-30（用户要求）：导入本地 TXT / M3U 直播源。
          * ★ 2026-10-14：两步导入 —— 首次返回 `needsName` 由渲染层弹框命名，二次带 `{ path, name }` 登记。
@@ -91,6 +93,8 @@ declare global {
           Promise<IpcResult<{ ok: boolean; needsName?: boolean; path?: string; name?: string; index?: number; replaced?: boolean; total?: number; error?: string }>>;
         /** ★ 2026-10-14（用户要求）：删除某条直播线路（下标） */
         deleteLive: (index: number) => Promise<IpcResult<void>>;
+        /** ★ 2026-10-16（用户要求）：批量删除直播线路（下标数组） */
+        deleteLives: (indices: number[]) => Promise<IpcResult<void>>;
         /** ★ 2026-10-14（用户要求）：重命名某条直播线路 */
         updateLive: (a: { index: number; name: string }) => Promise<IpcResult<void>>;
         /** ★ 2026-09-29：导入本地包（目录包：影视.json + py/js/jar/html/xbpq） */
@@ -183,7 +187,7 @@ declare global {
         /** ★ 发现页榜单（无源默认主页） */
         discover: (refresh?: boolean) => Promise<IpcResult<DiscoverSection[]>>;
         movieHot: () => Promise<IpcResult<MovieHotList>>;
-        discoverImages: (name: string, mediaType: 'movie' | 'tv', year?: string, kind?: 'backdrop' | 'poster') => Promise<IpcResult<MetaImages>>;
+        discoverImages: (name: string, mediaType: 'movie' | 'tv', year?: string, kind?: 'backdrop' | 'poster', doubanId?: string) => Promise<IpcResult<MetaImages>>;
         /** ★ 发现页「分类」：类型清单与按类型翻页 */
         genres: () => Promise<IpcResult<{ movie: DiscoverGenre[]; tv: DiscoverGenre[] }>>;
         genrePage: (mediaType: 'movie' | 'tv', genreId: number, page: number) => Promise<IpcResult<DiscoverGenrePage>>;
@@ -280,6 +284,14 @@ declare global {
         stop: () => Promise<IpcResult<{ ok: boolean }>>;
         onState: (cb: (s: MpvStateEvent) => void) => () => void;
       };
+      // ★ 2026-10-16 插件系统（M1）：列表 / 安装（主进程弹选择框）/ 卸载 / 启停 / 超分状态
+      plugins: {
+        list: () => Promise<IpcResult<PluginView[]>>;
+        install: () => Promise<IpcResult<{ ok: boolean; canceled?: boolean; reason?: string; items?: PluginView[] }>>;
+        uninstall: (id: string) => Promise<IpcResult<{ ok: boolean; reason?: string; items?: PluginView[] }>>;
+        setEnabled: (a: { id: string; enabled: boolean }) => Promise<IpcResult<{ ok: boolean; reason?: string; items?: PluginView[] }>>;
+        sr: () => Promise<IpcResult<SrState>>;
+      };
       // ★ 2026-09-29 磁力（BT）：本机已安装的外部播放器（MKV/HEVC 接力；只探测不启动）
       bt: {
         detectPlayers: () => Promise<IpcResult<Array<{ id: string; name: string; path: string }>>>;
@@ -343,6 +355,8 @@ export const client = {
   cfgImportLiveLocal: (args?: { name?: string; path?: string }) => unwrap(window.api.config.importLiveLocal(args)),
   /** ★ 2026-10-14（用户要求）：删除某条直播线路（下标） */
   cfgDeleteLive: (index: number) => unwrap(window.api.config.deleteLive(index)),
+  /** ★ 2026-10-16（用户要求）：批量删除直播线路（配置页多选删除） */
+  cfgDeleteLives: (indices: number[]) => unwrap(window.api.config.deleteLives(indices)),
   /** ★ 2026-10-14（用户要求）：重命名某条直播线路 */
   cfgUpdateLive: (a: { index: number; name: string }) => unwrap(window.api.config.updateLive(a)),
   /** ★ 2026-09-30：数据目录信息（安装目录/data；迁移结果与回退原因） */
@@ -458,7 +472,7 @@ export const client = {
   /** ★ 发现页榜单（无源默认主页；refresh 绕过 6h 缓存） */
   metaDiscover: (refresh?: boolean) => unwrap(window.api.meta.discover(refresh)),
   metaMovieHot: () => unwrap(window.api.meta.movieHot()),
-  metaDiscoverImages: (name: string, mediaType: 'movie' | 'tv', year?: string, kind?: 'backdrop' | 'poster') => unwrap(window.api.meta.discoverImages(name, mediaType, year, kind)),
+  metaDiscoverImages: (name: string, mediaType: 'movie' | 'tv', year?: string, kind?: 'backdrop' | 'poster', doubanId?: string) => unwrap(window.api.meta.discoverImages(name, mediaType, year, kind, doubanId)),
   /** ★ 发现页「分类」：TMDB 类型清单 */
   metaGenres: () => unwrap(window.api.meta.genres()),
   /** ★ 发现页「分类」：按类型取一页 */
@@ -481,6 +495,13 @@ export const client = {
   mpvCmd: (cmd: MpvCommand) => unwrap<{ ok: boolean }>(window.api.mpv.cmd(cmd)),
   mpvStop: () => unwrap<{ ok: boolean }>(window.api.mpv.stop()),
   mpvOnState: (cb: (s: MpvStateEvent) => void) => window.api.mpv.onState(cb as (s: unknown) => void),
+  // ★ 2026-10-16 插件系统（M1）：列表 / 安装 / 卸载 / 启停 / 超分状态
+  pluginList: () => unwrap<PluginView[]>(window.api.plugins.list()),
+  pluginInstall: () => unwrap<{ ok: boolean; canceled?: boolean; reason?: string; items?: PluginView[] }>(window.api.plugins.install()),
+  pluginUninstall: (id: string) => unwrap<{ ok: boolean; reason?: string; items?: PluginView[] }>(window.api.plugins.uninstall(id)),
+  pluginSetEnabled: (a: { id: string; enabled: boolean }) =>
+    unwrap<{ ok: boolean; reason?: string; items?: PluginView[] }>(window.api.plugins.setEnabled(a)),
+  pluginSr: () => unwrap<SrState>(window.api.plugins.sr()),
   /** ★ 2026-09-29 磁力（BT）：探测本机外部播放器（MKV/HEVC 接力；配置页可指定路径） */
   btDetectPlayers: () => unwrap(window.api.bt.detectPlayers()),
   /** ★ 2026-09-30（用户要求）：点播外部播放器（与磁力分开绑定）——探测本机播放器 / 用当前地址拉起 */
