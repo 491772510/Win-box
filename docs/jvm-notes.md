@@ -534,3 +534,58 @@ JAVA_HOME="C:/Program Files/Java/jdk-17" npx vitest run tests/jvmSpawnArgs.spec.
 
 ✅ 正确做法 = 比 **「新增行集合」**：两侧各取 `git diff -w ... | grep '^+' | grep -v '^+++' | sort`
 再比 md5 与行数。本次 11 个文件全部逐行一致（如 `ipc/index.ts` 74/74、`SpiderHost.ts` 96/96）。
+
+### 7.6 合并 1.21.9（界面缩放 / 播放诊断 / 全屏修复）时的取舍
+
+只有 **2 处冲突**，但两处都是「老朋友」：
+
+1. **`src/renderer/components/VideoPlayer.tsx` —— 同一套手法，第三次（§7.4-1 / §7.5-1 的复现）**：
+   上游该文件仍是 **100% CRLF**、本仓纯 LF ⇒ 整文件冲突。做法一字不变 =
+   **取上游内容 → 整文件转 LF → 重新贴回本仓补丁**。
+   ⚠️ **补丁处数会随上游重构而变化**：1.21.8 时上游裸用 `mpvInfo?.available` 是 **7 行**，
+   1.21.9 把 `toggleFull` 重构成窗口级全屏后降到 **5 行**。**动手前必须先 `grep -c` 对处数**
+   （本次 5 行 = 2 处 `!!mpvInfo?.available` + 3 处裸用）。贴完应为 **7 处 `mpvUsable`**
+   （定义 1 + 使用 5 + 依赖数组 1），裸 `mpvInfo?.available` 只剩**定义内部那 1 处**。
+   ⚠️ 上游这次还改了 effect 依赖数组：`[allowMpv, mpvInfo, kernelPref, url]` → 必须改回
+   `[allowMpv, mpvUsable, kernelPref, url]`（否则变成依赖整个 mpvInfo 对象）。
+2. **`src/main/ipc/index.ts` —— import 区冲突，两侧并存**（本地 `restartApp` +
+   上游 `noteMediaState` / `setUiScalePref, uiScaleState`）。同 §7.5-2 的 `index.ts` 同类冲突，
+   「import 区两侧并存」已是稳定裁定；本次自动合并部分（`registerIpc` 内新增的
+   `IPC.MEDIA_STATE` 监听与 `UI_GET_SCALE` / `UI_SET_SCALE` handler）无需人工干预。
+
+#### 1.21.9 带来的三处**用户可见**变化（不是纯跟版本）
+
+- **界面缩放**（新增 `src/shared/uiScale.ts` + `src/main/ui/uiScale.ts`）：按主显示器**工作区（DIP）**
+  推倍率，用 `webContents.setZoomFactor` 整体放大（不用 CSS `zoom`，因为全项目尺寸是 px、
+  且根元素缩放会让 `html{height:100%}` 的百分比高度算错）。
+  ★ 四个 UI 窗口都要登记：`main/index.ts`、`PlayerWindow.ts`、`DetailWindow.ts`、`SearchWindow.ts`
+  各一组 `registerUiWindow(...)` + `applyUiScale()`；`WebHomeWindow` 加载外部网页，**故意不登记**。
+  ★ 本机实测：工作区 2560×1392 → auto 档 **125%**，主窗口 1280×800 → **1600×1000**。
+  ★ 单测注意：`uiScale.ts` 惰性建 `JsonStore`，**不在模块导入期**碰 `app.getPath` ——
+  否则任何 import 它的 spec 都得先补全 electron 的 `app` 桩（上游自己踩过）。
+- **播放诊断**（新增 `src/main/util/mediaDiag.ts`）：渲染层上报 play/pause/waiting/stalled/emptied/
+  `frame-stall`/`hls-fatal`/visibility，主进程缓存「最后一次播放状态」，在 `child-process-gone`
+  （尤其 GPU 进程崩溃 = 用户症状「画面消失只剩声音」）时落盘带出「崩溃前在放哪一集、停在哪一帧」。
+  ★ 换集时**必须**清掉 `requestVideoFrameCallback` + 定时器 + 监听，否则会对旧 `<video>` 继续误报
+  （上游在 cleanup 里已处理）。
+- **全屏改为窗口级**：播放器窗口（`allowMpv=true`）的 **HTML5 全屏** 从浏览器元素全屏
+  （`requestFullscreen`）改成**主进程原生窗口全屏**，修「全屏自动换集后掉回小窗」
+  （元素全屏在换集时组件被卸载 → 浏览器强制退出全屏）。
+  ★ 与 §7.4 的 `mpvUsable` 补丁**互不相干，但同处一个文件**：替换时别把新引入的
+  `nativeFs` / `lastPlayerFullstate` / `fullRef` 误伤（只有 `allowMpv` 参与 `nativeFs`，与 `mpvUsable` 无关）。
+
+#### 平台维度（本次上游新增行）
+
+**零命中**：`join(';')` / 写死 `.exe` / `process.platform` / `'darwin'` / `'win32'` 全无。
+三个新文件都是平台无关的：`shared/uiScale.ts` 纯函数零依赖；`main/ui/uiScale.ts` 只用了
+`screen.getPrimaryDisplay().workAreaSize` + `path.join`；`mediaDiag.ts` 不 import electron
+（依赖方向只有 `main/ipc` → `mediaDiag`）。
+
+#### 验证基线（1.21.9 合并后）
+
+- `node scripts/build-main.mjs` ✅；`npx tsc --noEmit` **0 error**
+- 全量测试：**181 文件 / 2244 用例 → 2238 passed / 5 skipped / 1 failed**
+  （比 1.21.8 基线 +1 文件 / +14 passed，全部来自上游新增 `tests/uiScale.spec.ts`；
+  那 1 failed 仍是 §7.5 记录的 `pluginContract.spec.ts` 上游缺陷）
+- 实机冒烟：主进程 `ui-scale: 偏好=auto 工作区=2560x1392 → 125%（已应用 1 个窗口）`，
+  外观页出现「界面缩放」档位，renderer 零 error。
