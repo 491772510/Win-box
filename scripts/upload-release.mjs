@@ -28,7 +28,14 @@ if (args.some(a => a !== '--dry-run')) {
 }
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const tag = `release${pkg.version}`;
-const repo = 'yagami-hue/Win-box';
+// ★ 2026-10-17（本仓 fork）：发布目标默认从 origin 解析 —— 上游原值是硬编码的
+//   'yagami-hue/Win-box'，本仓若照抄会把安装包往原作者仓库推（必然 403，且是误操作）。
+//   优先级：WINBOX_RELEASE_REPO 环境变量 > git remote origin > 上游默认值。
+const repo = process.env.WINBOX_RELEASE_REPO
+  || /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec(
+    spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8' }).stdout?.trim() || '',
+  )?.[1]
+  || 'yagami-hue/Win-box';
 const output = resolve(root, pkg.build.directories.output);
 // electron-builder normalizes numeric version components when it creates the
 // artifact name (for example, package version 1.21.01 becomes 1.21.1).
